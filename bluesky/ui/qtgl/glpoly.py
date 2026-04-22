@@ -157,7 +157,7 @@ class Poly(glh.RenderObject, layer=-20):
                 try:
                     shape = polydata['shape']
                     coordinates = polydata['coordinates']
-                    color = polydata.get('color', palette.polys)
+                    color = polydata.get('color')
                     self.bufdata[name] = self.genbuffers(shape, coordinates, color)
                 except:
                     print("Could not process incoming poly data")
@@ -242,8 +242,25 @@ class Poly(glh.RenderObject, layer=-20):
             pset.addContour(newdata)
             fillbuf = np.array(pset.vbuf, dtype=np.float32)
 
+        # --- SET COLOR BASED ON SHAPE TYPE ---
+        
+        final_color = color # Start with the color passed in (if any)
+
+        if not final_color:
+            # If no color was passed in, pick one based on shape
+            if shape == 'LINE':
+                final_color = (255, 255, 0) # Yellow
+            elif shape[:4] == 'POLY':
+                final_color = (128, 128, 128) # Gray
+            elif shape == 'BOX':
+                final_color = (0, 0, 139) # DarkBlue (0, 0, 139) 
+            elif shape == 'CIRCLE':
+                final_color = (255, 255, 0) # Yellow
+            else:
+                final_color = palette.polys # Default (Blue)
+
         # Define color buffer for outline
-        defclr = tuple(color or palette.polys) + (255,)
+        defclr = tuple(final_color) + (255,)
         colorbuf = np.array(len(contourbuf) // 2 * defclr, dtype=np.uint8)
 
         # Store new or updated polygon by name, and concatenated with the

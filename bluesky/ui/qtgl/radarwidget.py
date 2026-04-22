@@ -132,7 +132,7 @@ class RadarWidget(glh.RenderWidget):
         self.shaderset.set_pan_and_zoom(self.pan[0], self.pan[1], self.zoom)
 
         # background color
-        glh.gl.glClearColor(0.7, 0.7, 0.7, 0)
+        glh.gl.glClearColor(0.1, 0.1, 0.1, 0)
         glh.gl.glEnable(glh.gl.GL_BLEND)
         glh.gl.glBlendFunc(glh.gl.GL_SRC_ALPHA, glh.gl.GL_ONE_MINUS_SRC_ALPHA)
 

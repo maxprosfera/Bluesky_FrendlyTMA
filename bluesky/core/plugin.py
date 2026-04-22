@@ -127,7 +127,7 @@ class Plugin:
                                 print(f"{fname} looks like a plugin, but init_plugin() doesn't return one or two dicts")
                                 continue
 
-                            cfgdict = {k.s:v for k,v in zip(ret_dicts[0].keys, ret_dicts[0].values)}
+                            cfgdict = {k:v for k,v in zip(ret_dicts[0].keys, ret_dicts[0].values)}
                             plugintype = cfgdict.get('plugin_type')
                             if plugintype is None:
                                 print(f'{fname} looks like a plugin, but no plugin type (sim/gui) is specified. ' 

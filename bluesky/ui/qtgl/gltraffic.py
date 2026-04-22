@@ -133,7 +133,8 @@ class Traffic(glh.RenderObject, layer=100):
 
         self.ssd = glh.VertexArrayObject(glh.gl.GL_POINTS, shader_type='ssd')
         self.protectedzone = glh.Circle()
-        self.ac_symbol = glh.VertexArrayObject(glh.gl.GL_TRIANGLE_FAN)
+        #self.ac_symbol = glh.VertexArrayObject(glh.gl.GL_TRIANGLE_FAN)
+        self.ac_symbol = glh.VertexArrayObject(glh.gl.GL_TRIANGLES)
         self.aclabels = glh.Text(settings.text_size, (8, 3))
         self.cpalines = glh.VertexArrayObject(glh.gl.GL_LINES)
         self.route = glh.VertexArrayObject(glh.gl.GL_LINES)
@@ -169,9 +170,20 @@ class Traffic(glh.RenderObject, layer=100):
         self.protectedzone.set_attribs(lat=self.lat, lon=self.lon, scale=self.rpz,
                                        color=self.color, instance_divisor=1)
 
-        acvertices = np.array([(0.0, 0.5 * ac_size), (-0.5 * ac_size, -0.5 * ac_size),
-                               (0.0, -0.25 * ac_size), (0.5 * ac_size, -0.5 * ac_size)],
-                              dtype=np.float32)
+        # acvertices = np.array([(0.0, 0.5 * ac_size), (-0.5 * ac_size, -0.5 * ac_size),
+        #                        (0.0, -0.25 * ac_size), (0.5 * ac_size, -0.5 * ac_size)],
+        #                       dtype=np.float32)
+        
+        # Define airplane shape using 3 triangles (Fuselage, Wings, Tail)
+        # Scale factors are tuned to look like a generic airliner
+        acvertices = np.array([
+            # Triangle 1: Fuselage (Long thin body)
+            (0.0,  0.5 * ac_size),  (-0.08 * ac_size, -0.5 * ac_size), ( 0.08 * ac_size, -0.5 * ac_size),
+            # Triangle 2: Main Wings
+            (0.0,  0.2 * ac_size),  (-0.50 * ac_size, -0.2 * ac_size), ( 0.50 * ac_size, -0.2 * ac_size),
+            # Triangle 3: Tail Stabilizers
+            (0.0, -0.2 * ac_size),  (-0.25 * ac_size, -0.5 * ac_size), ( 0.25 * ac_size, -0.5 * ac_size)
+        ], dtype=np.float32)
         self.ac_symbol.create(vertex=acvertices)
 
         self.ac_symbol.set_attribs(lat=self.lat, lon=self.lon, color=self.color,
@@ -303,11 +315,12 @@ class Traffic(glh.RenderObject, layer=100):
                     if alt < 0:
                         txt += "-----/"
                     # TODO: get from sim
-                    elif alt > 5000.0 * ft:
+                    # elif alt > 5000.0 * ft:
+                    else:
                         FL = int(round((alt / (100. * ft))))
                         txt += "FL%03d/" % FL
-                    else:
-                        txt += "%05d/" % int(round(alt / ft))
+                    # else:
+                    #     txt += "%05d/" % int(round(alt / ft))
 
                     # Speed
                     if spd < 0:
@@ -392,10 +405,10 @@ class Traffic(glh.RenderObject, layer=100):
                 if self.show_lbl >= 1:
                     rawlabel += '%-8s' % acid[:8]
                     if self.show_lbl == 2:
-                        if alt <= data.translvl:
-                            rawlabel += '%-5d' % int(alt / ft + 0.5)
-                        else:
-                            rawlabel += 'FL%03d' % int(alt / ft / 100. + 0.5)
+                        # if alt <= data.translvl:
+                        #     rawlabel += '%-5d' % int(alt / ft + 0.5)
+                        # else:
+                        rawlabel += 'FL%03d' % int(alt / ft / 100. + 0.5)
                         vsarrow = 30 if vs > 0.25 else 31 if vs < -0.25 else 32
                         rawlabel += '%1s  %-8d' % (chr(vsarrow),
                                                    int(cas / kts + 0.5))
