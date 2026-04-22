@@ -1,0 +1,36 @@
+BADA MAXIMUM RANGE CRUISE FILE                                   Mar 17 2016
+
+Type: JET
+AC: B744ERGE
+Engine rating: 
+Number of tables: 1
+
+Table name: MRC
+Table type: 1D
+Table variables: CW
+Table dimension: 21x1
+Table results: Mmrc [-]
+
+        CW|      Mmrc
+=====================
+  1.083923|  0.547959
+  1.374911|  0.606515
+  1.665899|  0.656111
+  1.956887|  0.700909
+  2.247875|  0.744631
+  2.538863|  0.789193
+  2.829851|  0.819620
+  3.120839|  0.832333
+  3.411827|  0.837569
+  3.702815|  0.839225
+  3.993803|  0.838742
+  4.284791|  0.836795
+  4.575779|       NaN
+  4.866767|       NaN
+  5.157755|       NaN
+  5.448742|       NaN
+  5.739730|       NaN
+  6.030718|       NaN
+  6.321706|       NaN
+  6.612694|       NaN
+  6.903682|       NaN

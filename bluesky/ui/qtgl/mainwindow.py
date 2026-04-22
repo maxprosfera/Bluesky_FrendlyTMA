@@ -4,8 +4,11 @@ import platform
 
 from PyQt6.QtWidgets import QApplication as app, QWidget, QMainWindow, \
     QSplashScreen, QTreeWidgetItem, QPushButton, QFileDialog, QDialog, \
-    QTreeWidget, QVBoxLayout, QDialogButtonBox, QMenu, QLabel
-from PyQt6.QtCore import Qt, pyqtSlot, QTimer, QItemSelectionModel, QSize, QEvent, pyqtProperty, QDir
+    QTreeWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QDialogButtonBox, \
+    QMenu, QLabel, QDateEdit, QTimeEdit, QSpinBox, QDoubleSpinBox, QComboBox, \
+    QGroupBox
+from PyQt6.QtCore import Qt, pyqtSlot, QTimer, QItemSelectionModel, QSize, \
+    QEvent, pyqtProperty, QDir, QDate, QTime
 from PyQt6.QtGui import QPixmap, QIcon
 from PyQt6 import uic
 
@@ -115,6 +118,156 @@ class DiscoveryDialog(QDialog):
             self.close()
 
 
+_ESSA_BBOX = dict(lamin=58.5, lomin=17.0, lamax=60.5, lomax=20.5)
+_PRESETS = {
+    'ESSA Arlanda TMA': _ESSA_BBOX,
+}
+
+
+class OpenSkyDialog(QDialog):
+    """Dialog for fetching and replaying historical OpenSky traffic."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Load OpenSky Historical Traffic')
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        root = QVBoxLayout(self)
+
+        # --- Credential warning ---
+        self._warn_label = QLabel()
+        self._warn_label.setWordWrap(True)
+        self._warn_label.setStyleSheet(
+            'background:#7a6000;color:#ffe066;padding:6px;border-radius:4px;'
+        )
+        self._warn_label.setVisible(False)
+        root.addWidget(self._warn_label)
+
+        # --- Date/time/duration ---
+        dt_group = QGroupBox('Time (UTC)')
+        dt_form = QFormLayout(dt_group)
+
+        # Default to today at (now - 30 min) so the window is within the live 60-min limit
+        from PyQt6.QtCore import QDateTime
+        now_qt = QDateTime.currentDateTimeUtc()
+        default_dt = now_qt.addSecs(-1800)
+        self.date_edit = QDateEdit(default_dt.date())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat('yyyy-MM-dd')
+        dt_form.addRow('Date:', self.date_edit)
+
+        self.time_edit = QTimeEdit(default_dt.time())
+        self.time_edit.setDisplayFormat('HH:mm')
+        dt_form.addRow('Time (UTC):', self.time_edit)
+
+        # Limit info
+        limit_label = QLabel('Note: standard accounts can only access live data (last 60 min).')
+        limit_label.setWordWrap(True)
+        limit_label.setStyleSheet('color:#aaaaaa;font-size:10px;')
+        dt_form.addRow('', limit_label)
+
+        self.duration_spin = QSpinBox()
+        self.duration_spin.setRange(1, 59)
+        self.duration_spin.setValue(30)
+        self.duration_spin.setSuffix(' min')
+        dt_form.addRow('Duration:', self.duration_spin)
+
+        root.addWidget(dt_group)
+
+        # --- Area ---
+        area_group = QGroupBox('Area')
+        area_layout = QVBoxLayout(area_group)
+
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel('Preset:'))
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItems(list(_PRESETS.keys()) + ['Custom'])
+        self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
+        preset_row.addWidget(self.preset_combo)
+        area_layout.addLayout(preset_row)
+
+        bbox_form = QFormLayout()
+
+        self.lamin_spin = QDoubleSpinBox()
+        self.lamin_spin.setRange(-90, 90)
+        self.lamin_spin.setDecimals(4)
+        self.lamin_spin.setSingleStep(0.5)
+        bbox_form.addRow('Lat min:', self.lamin_spin)
+
+        self.lomin_spin = QDoubleSpinBox()
+        self.lomin_spin.setRange(-180, 180)
+        self.lomin_spin.setDecimals(4)
+        self.lomin_spin.setSingleStep(0.5)
+        bbox_form.addRow('Lon min:', self.lomin_spin)
+
+        self.lamax_spin = QDoubleSpinBox()
+        self.lamax_spin.setRange(-90, 90)
+        self.lamax_spin.setDecimals(4)
+        self.lamax_spin.setSingleStep(0.5)
+        bbox_form.addRow('Lat max:', self.lamax_spin)
+
+        self.lomax_spin = QDoubleSpinBox()
+        self.lomax_spin.setRange(-180, 180)
+        self.lomax_spin.setDecimals(4)
+        self.lomax_spin.setSingleStep(0.5)
+        bbox_form.addRow('Lon max:', self.lomax_spin)
+
+        area_layout.addLayout(bbox_form)
+        root.addWidget(area_group)
+
+        # --- Buttons ---
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        # Apply first preset
+        self._on_preset_changed(self.preset_combo.currentText())
+        self._check_credentials()
+
+    # ------------------------------------------------------------------
+
+    def _check_credentials(self):
+        client_id = getattr(bs.settings, 'opensky_client_id', '')
+        if not client_id:
+            self._warn_label.setText(
+                '\u26a0  OpenSky credentials not configured.\n'
+                'Add opensky_client_id and opensky_client_secret to settings.cfg.'
+            )
+            self._warn_label.setVisible(True)
+        else:
+            self._warn_label.setVisible(False)
+
+    def _on_preset_changed(self, name: str):
+        bbox = _PRESETS.get(name)
+        is_custom = bbox is None
+        for spin in (self.lamin_spin, self.lomin_spin, self.lamax_spin, self.lomax_spin):
+            spin.setReadOnly(not is_custom)
+        if bbox:
+            self.lamin_spin.setValue(bbox['lamin'])
+            self.lomin_spin.setValue(bbox['lomin'])
+            self.lamax_spin.setValue(bbox['lamax'])
+            self.lomax_spin.setValue(bbox['lomax'])
+
+    def _on_accept(self):
+        date_str = self.date_edit.date().toString('yyyy-MM-dd')
+        time_str = self.time_edit.time().toString('HH:mm')
+        dt_str = f'{date_str}T{time_str}'
+
+        lamin = self.lamin_spin.value()
+        lomin = self.lomin_spin.value()
+        lamax = self.lamax_spin.value()
+        lomax = self.lomax_spin.value()
+        duration = self.duration_spin.value()
+
+        cmd = f'LOADOPENSKY {dt_str} {lamin} {lomin} {lamax} {lomax} {duration}'
+        stack.stack(cmd)
+        self.accept()
+
+
 class MainWindow(QMainWindow, Base):
     """ Qt window process: from .ui file read UI window-definition of main window """
 
@@ -189,6 +342,8 @@ class MainWindow(QMainWindow, Base):
         self.action_Save.triggered.connect(self.buttonClicked)
         self.actionBlueSky_help.triggered.connect(self.show_doc_window)
         self.actionSettings.triggered.connect(self.settingswin.show)
+
+        # OSHist button wired via buttonClicked() below (custom1 in Cust block).
 
         # Connect to io client's nodelist changed signal
         bs.net.node_added.connect(self.nodesChanged)
@@ -524,6 +679,8 @@ class MainWindow(QMainWindow, Base):
             stack.stack('SHOWMAP')
         elif self.sender() == self.action_Save:
             stack.stack('SAVEIC')
+        elif self.sender() == self.custom1:
+            self._open_opensky_dialog()
         elif hasattr(self.sender(), 'server_id'):
             bs.net.send(b'ADDNODES', 1, self.sender().server_id)
 
@@ -562,3 +719,7 @@ class MainWindow(QMainWindow, Base):
     def show_doc_window(self, cmd=''):
         self.docwin.show_cmd_doc(cmd)
         self.docwin.show()
+
+    def _open_opensky_dialog(self):
+        dlg = OpenSkyDialog(self)
+        dlg.exec()

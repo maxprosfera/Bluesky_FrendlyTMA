@@ -912,8 +912,11 @@
                <property name="focusPolicy">
                 <enum>Qt::NoFocus</enum>
                </property>
+               <property name="toolTip">
+                <string>Fetch historical OpenSky traffic and load it as a BlueSky scenario</string>
+               </property>
                <property name="text">
-                <string>C1</string>
+                <string>OSHist</string>
                </property>
               </widget>
              </item>
