@@ -938,7 +938,7 @@
                 <enum>Qt::NoFocus</enum>
                </property>
                <property name="text">
-                <string>C2</string>
+                <string>Traces</string>
                </property>
               </widget>
              </item>
@@ -960,7 +960,7 @@
                 <enum>Qt::NoFocus</enum>
                </property>
                <property name="text">
-                <string>C3</string>
+                <string>Fuel</string>
                </property>
               </widget>
              </item>
@@ -982,7 +982,7 @@
                 <enum>Qt::NoFocus</enum>
                </property>
                <property name="text">
-                <string>C4</string>
+                <string>CDO</string>
                </property>
               </widget>
              </item>

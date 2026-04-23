@@ -14,11 +14,12 @@ from bluesky.network.sharedstate import ActData
 
 # Register settings defaults
 settings.set_variable_defaults(
-    text_size=13, ac_size=16,
+    text_size=7, ac_size=8,
     asas_vmin=200.0, asas_vmax=500.0)
 
 palette.set_default_colours(
-    aircraft=(0, 255, 0),
+    aircraft=(255, 255, 255),
+    aircraft_cs=(0, 200, 70),
     conflict=(255, 160, 0),
     route=(255, 0, 255),
     trails=(0, 255, 255))
@@ -127,15 +128,18 @@ class Traffic(glh.RenderObject, layer=100):
         self.alt = glh.GLBuffer()
         self.tas = glh.GLBuffer()
         self.color = glh.GLBuffer()
+        self.color_cs = glh.GLBuffer()
         self.lbl = glh.GLBuffer()
+        self.lbl_cs = glh.GLBuffer()
         self.asasn = glh.GLBuffer()
         self.asase = glh.GLBuffer()
 
         self.ssd = glh.VertexArrayObject(glh.gl.GL_POINTS, shader_type='ssd')
         self.protectedzone = glh.Circle()
-        #self.ac_symbol = glh.VertexArrayObject(glh.gl.GL_TRIANGLE_FAN)
         self.ac_symbol = glh.VertexArrayObject(glh.gl.GL_TRIANGLES)
-        self.aclabels = glh.Text(settings.text_size, (8, 3))
+        self.leadlines = glh.VertexArrayObject(glh.gl.GL_LINES)
+        self.aclabels = glh.Text(settings.text_size, (8, 2))
+        self.aclabels_cs = glh.Text(settings.text_size, (8, 1))
         self.cpalines = glh.VertexArrayObject(glh.gl.GL_LINES)
         self.route = glh.VertexArrayObject(glh.gl.GL_LINES)
         self.routelbl = glh.Text(settings.text_size, (12, 2))
@@ -151,7 +155,9 @@ class Traffic(glh.RenderObject, layer=100):
         self.alt.create(MAX_NAIRCRAFT * 4, glh.GLBuffer.UsagePattern.StreamDraw)
         self.tas.create(MAX_NAIRCRAFT * 4, glh.GLBuffer.UsagePattern.StreamDraw)
         self.color.create(MAX_NAIRCRAFT * 4, glh.GLBuffer.UsagePattern.StreamDraw)
-        self.lbl.create(MAX_NAIRCRAFT * 24, glh.GLBuffer.UsagePattern.StreamDraw)
+        self.color_cs.create(MAX_NAIRCRAFT * 4, glh.GLBuffer.UsagePattern.StreamDraw)
+        self.lbl.create(MAX_NAIRCRAFT * 16, glh.GLBuffer.UsagePattern.StreamDraw)
+        self.lbl_cs.create(MAX_NAIRCRAFT * 8, glh.GLBuffer.UsagePattern.StreamDraw)
         self.asasn.create(MAX_NAIRCRAFT * 24, glh.GLBuffer.UsagePattern.StreamDraw)
         self.asase.create(MAX_NAIRCRAFT * 24, glh.GLBuffer.UsagePattern.StreamDraw)
         self.rpz.create(MAX_NAIRCRAFT * 4, glh.GLBuffer.UsagePattern.StreamDraw)
@@ -189,8 +195,23 @@ class Traffic(glh.RenderObject, layer=100):
         self.ac_symbol.set_attribs(lat=self.lat, lon=self.lon, color=self.color,
                                    orientation=self.hdg, instance_divisor=1)
 
+        # Leader line: from aircraft origin (0,0) to label offset (ac_size, -0.5*ac_size)
+        leader_verts = np.array([0.0, 0.0, ac_size, -0.5 * ac_size], dtype=np.float32)
+        self.leadlines.create(vertex=leader_verts)
+        self.leadlines.set_attribs(lat=self.lat, lon=self.lon, color=self.color,
+                                   instance_divisor=1)
+
+        # Data block label (FL + speed) — white via self.color
+        # Positioned one line below the callsign
+        lbl_x = ac_size
+        lbl_y_cs = -0.5 * ac_size
+        lbl_y_data = lbl_y_cs - settings.text_size * self.aclabels_cs.font.char_ar
         self.aclabels.create(self.lbl, self.lat, self.lon, self.color,
-                             (ac_size, -0.5 * ac_size), instanced=True)
+                             (lbl_x, lbl_y_data), instanced=True)
+
+        # Callsign label — darker green via self.color_cs, at the top of the data block
+        self.aclabels_cs.create(self.lbl_cs, self.lat, self.lon, self.color_cs,
+                                (lbl_x, lbl_y_cs), instanced=True)
 
         self.cpalines.create(vertex=MAX_NCONFLICTS * 16, color=palette.conflict, usage=glh.GLBuffer.UsagePattern.StreamDraw)
 
@@ -248,7 +269,10 @@ class Traffic(glh.RenderObject, layer=100):
             self.routelbl.draw()
 
         if self.show_lbl:
+            # Leader line from symbol to data block
+            self.leadlines.draw(n_instances=self.naircraft)
             self.aclabels.draw(n_instances=self.naircraft)
+            self.aclabels_cs.draw(n_instances=self.naircraft)
 
         # SSD
         if self.ssd_all or self.ssd_conflicts or len(self.ssd_ownship) > 0:
@@ -386,7 +410,10 @@ class Traffic(glh.RenderObject, layer=100):
 
             # Labels and colors
             rawlabel = ''
+            rawlabel_cs = ''
             color = np.empty(
+                (min(naircraft, MAX_NAIRCRAFT), 4), dtype=np.uint8)
+            color_cs = np.empty(
                 (min(naircraft, MAX_NAIRCRAFT), 4), dtype=np.uint8)
             selssd = np.zeros(naircraft, dtype=np.uint8)
             confidx = 0
@@ -401,13 +428,13 @@ class Traffic(glh.RenderObject, layer=100):
                 if i >= MAX_NAIRCRAFT:
                     break
 
-                # Make label: 3 lines of 8 characters per aircraft
+                # Callsign label (line 1 of data block)
                 if self.show_lbl >= 1:
-                    rawlabel += '%-8s' % acid[:8]
+                    rawlabel_cs += '%-8s' % acid[:8]
+
+                # Data block label (lines 2-3: FL + CAS)
+                if self.show_lbl >= 1:
                     if self.show_lbl == 2:
-                        # if alt <= data.translvl:
-                        #     rawlabel += '%-5d' % int(alt / ft + 0.5)
-                        # else:
                         rawlabel += 'FL%03d' % int(alt / ft / 100. + 0.5)
                         vsarrow = 30 if vs > 0.25 else 31 if vs < -0.25 else 32
                         rawlabel += '%1s  %-8d' % (chr(vsarrow),
@@ -419,12 +446,12 @@ class Traffic(glh.RenderObject, layer=100):
                     if self.ssd_conflicts:
                         selssd[i] = 255
                     color[i, :] = palette.conflict + (255,)
+                    color_cs[i, :] = palette.conflict + (255,)
                     lat1, lon1 = geo.qdrpos(lat, lon, trk, tcpa * gs / nm)
                     cpalines[4 * confidx: 4 * confidx +
                              4] = [lat, lon, lat1, lon1]
                     confidx += 1
                 else:
-                    # Get custom color if available, else default
                     rgb = palette.aircraft
                     if ingroup:
                         for groupmask, groupcolor in custgrclr.items():
@@ -433,8 +460,8 @@ class Traffic(glh.RenderObject, layer=100):
                                 break
                     rgb = custacclr.get(acid, rgb)
                     color[i, :] = tuple(rgb) + (255,)
+                    color_cs[i, :] = tuple(palette.aircraft_cs) + (255,)
 
-                #  Check if aircraft is selected to show SSD
                 if self.ssd_all or acid in self.ssd_ownship:
                     selssd[i] = 255
 
@@ -442,7 +469,9 @@ class Traffic(glh.RenderObject, layer=100):
                 self.ssd.update(selssd=selssd)
             self.cpalines.update(vertex=cpalines)
             self.color.update(color)
+            self.color_cs.update(color_cs)
             self.lbl.update(np.array(rawlabel.encode('utf8'), dtype=np.bytes_))
+            self.lbl_cs.update(np.array(rawlabel_cs.encode('utf8'), dtype=np.bytes_))
             
             # If there is a visible route, update the start position
             if self.route_acid in data.id:

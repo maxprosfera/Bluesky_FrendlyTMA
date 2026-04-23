@@ -118,7 +118,7 @@ class DiscoveryDialog(QDialog):
             self.close()
 
 
-_ESSA_BBOX = dict(lamin=58.5, lomin=17.0, lamax=60.5, lomax=20.5)
+_ESSA_BBOX = dict(lamin=58.53, lomin=16.18, lamax=60.35, lomax=19.92)
 _PRESETS = {
     'ESSA Arlanda TMA': _ESSA_BBOX,
 }
@@ -681,6 +681,12 @@ class MainWindow(QMainWindow, Base):
             stack.stack('SAVEIC')
         elif self.sender() == self.custom1:
             self._open_opensky_dialog()
+        elif self.sender() == self.custom2:
+            stack.stack('TRACETOGGLE')
+        elif self.sender() == self.custom3:
+            stack.stack('FUELCALC')
+        elif self.sender() == self.custom4:
+            stack.stack('CDOGEN')
         elif hasattr(self.sender(), 'server_id'):
             bs.net.send(b'ADDNODES', 1, self.sender().server_id)
 
