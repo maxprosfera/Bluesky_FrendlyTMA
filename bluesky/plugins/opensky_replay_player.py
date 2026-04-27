@@ -152,12 +152,32 @@ def update():
 # Stack commands
 # ---------------------------------------------------------------------------
 
-def start_replay(csv_path: str):
-    global _tracks, _managed, _start_simt, _start_ts, _active
-
+def _resolve_icase(csv_path: str) -> Path:
+    """Resolve csv_path handling BlueSky's .scn uppercasing of arguments."""
     path = Path(csv_path)
     if not path.is_absolute():
         path = _REPO_ROOT / csv_path
+    if path.exists():
+        return path
+    try:
+        rel_parts = path.relative_to(_REPO_ROOT).parts
+    except ValueError:
+        return path
+    parent = _REPO_ROOT
+    for part in rel_parts[:-1]:
+        matches = [d for d in parent.iterdir() if d.name.lower() == part.lower() and d.is_dir()]
+        if not matches:
+            return path
+        parent = matches[0]
+    fname   = rel_parts[-1]
+    matches = [f for f in parent.iterdir() if f.name.lower() == fname.lower()]
+    return matches[0] if matches else path
+
+
+def start_replay(csv_path: str):
+    global _tracks, _managed, _start_simt, _start_ts, _active
+
+    path = _resolve_icase(csv_path)
     if not path.exists():
         return False, f'STARTREPLAY: file not found: {path}'
 

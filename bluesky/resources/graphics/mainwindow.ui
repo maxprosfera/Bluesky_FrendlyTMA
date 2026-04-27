@@ -1004,7 +1004,7 @@
                 <enum>Qt::NoFocus</enum>
                </property>
                <property name="text">
-                <string>C5</string>
+                <string>TMAOpt</string>
                </property>
               </widget>
              </item>

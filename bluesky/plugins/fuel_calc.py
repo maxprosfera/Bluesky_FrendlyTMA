@@ -42,10 +42,40 @@ _R      = 287.05287    # J/(kg·K)  gas constant air
 _k      = 1.4          # ratio of specific heats
 _T0     = 288.15       # K  MSL temperature
 _p0     = 101325.0     # Pa MSL pressure
+_FAP_ALT_M  = 457.2    # 1500 ft — MATLAB ends integration here (FAP altitude)
+_MIN_TAS_MS = 77.0     # ~150 kt — below this BADA clean-config aerodynamics invalid
 _rho0   = 1.225        # kg/m³ MSL density
 _a0     = 340.294      # m/s  speed of sound at MSL
 _beta_T = -0.0065      # K/m  temperature lapse rate troposphere
 _H_trop = 11000.0      # m   tropopause altitude
+
+# ESSA threshold (used for arrival classification)
+_ESSA_LAT = 59.6519
+_ESSA_LON = 17.9186
+
+
+def _dist_deg(lat1, lon1, lat2, lon2):
+    dlat = lat1 - lat2; dlon = lon1 - lon2
+    return (dlat**2 + dlon**2) ** 0.5
+
+
+def _classify_track(ac_rows: list) -> str:
+    """Return 'arr', 'dep', or 'other' based on distance/altitude trend to ESSA.
+    Uses the same logic as opensky_traces._classify().
+    """
+    wps = [(r['lat'], r['lon'], r['baro_alt_m'])
+           for r in ac_rows
+           if r['baro_alt_m'] > 0 and not r['on_ground']]
+    if len(wps) < 2:
+        return 'other'
+    first_alt  = wps[0][2];  last_alt  = wps[-1][2]
+    first_dist = _dist_deg(wps[0][0], wps[0][1], _ESSA_LAT, _ESSA_LON)
+    last_dist  = _dist_deg(wps[-1][0], wps[-1][1], _ESSA_LAT, _ESSA_LON)
+    if last_alt < first_alt and last_dist < first_dist:
+        return 'arr'
+    if last_alt > first_alt and last_dist > first_dist:
+        return 'dep'
+    return 'other'
 
 # ---------------------------------------------------------------------------
 # BADA 4.2 model lookup  (ICAO type → BADA folder)
@@ -57,21 +87,49 @@ _BADA_MAP = {
     'A359': 'A350-941', 'A35K': 'A350-941', 'A333': 'A330-341',
     'A332': 'A330-321', 'A343': 'A340-313', 'A388': 'A380-861',
     'A306': 'A300B4-622',
-    'B736': 'B73622',  'B737': 'B737W24',  'B738': 'B738W26',
-    'B38M': 'B738W26', 'B739': 'B739ERW26','B733': 'B73320',
-    'B732': 'B73215',  'B752': 'B752WRR40','B753': 'B753RR',
-    'B788': 'B788RR70','B789': 'B789RR74', 'B78X': 'B789RR74',
-    'B77W': 'B773ERGE115B', 'B763': 'B763ERGE61', 'B742': 'B742RR',
+    'B736': 'B73622',   'B737': 'B737W24',  'B738': 'B738W26',
+    'B38M': 'B738W26',  'B739': 'B739ERW26','B733': 'B73320',
+    'B732': 'B73215',   'B752': 'B752WRR40','B753': 'B753RR',
+    'B744': 'B744GE',   'B748': 'B748F',
+    'B788': 'B788RR70', 'B789': 'B789RR74', 'B78X': 'B789RR74',
+    'B77W': 'B773ERGE115B', 'B77L': 'B772LR', 'B77F': 'B772LR',
+    'B763': 'B763ERGE61', 'B742': 'B742RR',
     'AT76': 'ATR72-600', 'AT75': 'ATR72-500', 'AT72': 'ATR72-210',
-    'DH8D': 'ATR72-600',
+    'AT45': 'ATR42-500', 'AT43': 'ATR42-300',
+    'DH8D': 'ATR72-600', 'DH8C': 'ATR72-200', 'DH8A': 'ATR42-300',
     'E170': 'EMB-170STD', 'E175': 'EMB-175STD',
     'E190': 'EMB-190STD', 'E195': 'EMB-195STD',
-    'CRJ9': 'EMB-175STD', 'CRJX': 'EMB-175STD',
-    'BCS3': 'A319-131',   'PC24': 'EMB-505', 'PC12': 'ATR42-300',
-    'SU95': 'EMB-175STD', 'G550': 'EMB-175STD', 'G650': 'EMB-175STD',
+    'CRJ9': 'EMB-190LR',  'CRJX': 'EMB-190LR',
+    'BCS3': 'A319-131',   'BCS1': 'A318-112',
+    'PC24': 'EMB-505',    'PC12': 'ATR42-300',
+    'SB20': 'ATR72-200',  'SF34': 'ATR42-300',
+    'SU95': 'EMB-175STD', 'G550': 'EMB-505', 'G650': 'EMB-505',
 }
+
+# ICAO type prefixes / exact types that are piston/helicopter/ultralight —
+# skip these entirely (no valid BADA4 jet/turboprop model available)
+_GA_TYPES = {
+    'C172', 'C182', 'C208', 'C206', 'C152', 'C150', 'C525', 'C56X',
+    'P28A', 'P28B', 'PA46', 'PA31', 'PA34',
+    'RV10', 'RV6', 'RV7', 'RV8', 'RV9',
+    'GLAS', 'GLID', 'ULAC',
+    'EC45', 'EC35', 'EC35', 'AS50', 'R44', 'R22', 'B06', 'B407',
+    'A109', 'A169', 'H135', 'H145', 'S76', 'S92',
+    'HIGH', 'ULAC', 'BALL', 'SHIP',
+    'B429', 'BK17', 'EC30', 'EC25',
+}
+_GA_PREFIXES = ('EC', 'R4', 'R2', 'AS', 'S7', 'S9', 'H1', 'H6')
+
 _BADA_FALLBACK = 'B738W26'
 _MLW_FACTOR    = 0.9
+
+
+def _is_ga(actype: str) -> bool:
+    """Return True if the ICAO aircraft type is GA/helicopter/ultralight."""
+    if not actype:
+        return False
+    t = actype.upper()
+    return t in _GA_TYPES or t.startswith(_GA_PREFIXES)
 
 # Module-level caches
 _bada_cache:        dict = {}
@@ -99,16 +157,9 @@ def fuelcalc(csv_path: 'txt' = ''):
     """Calculate TMA fuel consumption from OpenSky tracks CSV.
     Syntax: FUELCALC [csv_path]"""
     if not csv_path:
-        scenname = stack.get_scenname()
-        if scenname:
-            stem = Path(scenname).stem.replace('_cdo', '').replace('_tracks', '')
-            candidate = _SCENARIO_DIR / f'{stem}_tracks.csv'
-            if candidate.is_file():
-                csv_path = str(candidate)
-        if not csv_path:
-            csv_path = _auto_detect_csv()
+        csv_path = _csv_from_scenario() or _auto_detect_csv()
     if not csv_path:
-        stack.stack('ECHO FUELCALC: No *_tracks.csv found in scenario/OpenSky/')
+        stack.stack('ECHO FUELCALC: No tracks CSV found for current scenario.')
         return
     stack.stack(f'ECHO FUELCALC: Starting for {Path(csv_path).name} ...')
     t = threading.Thread(target=_run_calc, args=(csv_path,), daemon=True)
@@ -116,18 +167,63 @@ def fuelcalc(csv_path: 'txt' = ''):
 
 
 # ---------------------------------------------------------------------------
-# Auto-detect latest tracks CSV
+# Scenario-aware CSV detection (mirrors opensky_traces.py logic)
 # ---------------------------------------------------------------------------
 
-def _auto_detect_csv() -> str:
-    if not _SCENARIO_DIR.is_dir():
+def _csv_from_scenario() -> str:
+    """Read ic.scn to find the current scenario, then return its historical tracks CSV."""
+    ic_scn = _REPO_ROOT / 'scenario' / 'ic.scn'
+    if not ic_scn.exists():
         return ''
-    candidates = sorted(
-        _SCENARIO_DIR.glob('*_tracks.csv'),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    try:
+        for line in ic_scn.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if line.startswith('#'):
+                continue
+            if '>IC ' in line or '> IC ' in line:
+                parts = line.split('IC ', 1)
+                if len(parts) < 2:
+                    continue
+                scn_path = Path(parts[1].strip())
+                if not scn_path.exists():
+                    return ''
+                # Scan .scn for STARTREPLAY or LOADTRACES line
+                for scn_line in scn_path.read_text(encoding='utf-8').splitlines():
+                    upper = scn_line.upper()
+                    for kw in ('STARTREPLAY', 'LOADTRACES'):
+                        idx = upper.find(kw)
+                        if idx != -1:
+                            token = scn_line[idx + len(kw):].strip()
+                            if not token:
+                                continue
+                            p = Path(token)
+                            if not p.is_absolute():
+                                p = _REPO_ROOT / p
+                            # TMAOpt: swap optimised → historical CSV
+                            if p.stem.endswith('_tracks') and 'TMAOpt' in str(p):
+                                hist = p.with_name(
+                                    p.stem.replace('_tracks', '_historical') + '.csv'
+                                )
+                                return str(hist) if hist.exists() else ''
+                            # OpenSky: use directly
+                            return str(p) if p.exists() else ''
+                break
+    except Exception:
+        pass
+    return ''
+
+
+def _auto_detect_csv() -> str:
+    """Fall-back: most recently modified historical tracks CSV across known folders."""
+    import glob as _glob
+    candidates = (
+        _glob.glob(str(_REPO_ROOT / 'scenario' / 'OpenSky' / '*_tracks.csv'))
+        + _glob.glob(str(_REPO_ROOT / 'scenario' / 'TMAOpt' / '**' / '*_historical.csv'),
+                     recursive=True)
     )
-    return str(candidates[0]) if candidates else ''
+    if not candidates:
+        return ''
+    return max(candidates, key=lambda p: Path(p).stat().st_mtime)
 
 
 # ---------------------------------------------------------------------------
@@ -155,13 +251,25 @@ def _run_calc(csv_path: str):
     for row in rows:
         groups[row['callsign']].append(row)
 
+    _enrich_actype_cache(groups)
+
     results = []
     errors  = []
 
     for cs, ac_rows in groups.items():
         ac_rows.sort(key=lambda r: r['time'])
         icao24    = ac_rows[0].get('icao24', '')
-        actype    = _resolve_actype(icao24)
+        actype    = _resolve_actype(icao24, cs)
+
+        # Skip GA/helicopter/ultralight — no valid BADA4 model
+        if _is_ga(actype):
+            continue
+
+        # Skip departures and pass-through flights — arrivals only
+        flight_type = _classify_track(ac_rows)
+        if flight_type != 'arr':
+            continue
+
         bada_name = _resolve_bada_model(actype)
 
         try:
@@ -178,24 +286,36 @@ def _run_calc(csv_path: str):
         try:
             res = _calc_fuel_aircraft(ac_rows, bada, weather)
             res.update(callsign=cs, icao24=icao24,
-                       actype=actype, bada_model=bada_name)
+                       actype=actype, bada_model=bada_name,
+                       flight_type=flight_type)
             results.append(res)
         except Exception as e:
             errors.append(f'{cs}: calc error: {e}')
 
-    out_path = _SCENARIO_DIR / f'fuel_{stem}.csv'
-    _save_fuel_csv(out_path, results)
+    out_path = csv_path.parent / f'fuel_{stem}.csv'
+    # Only save/report flights with non-zero fuel (had valid segments above FAP)
+    results_valid = [r for r in results if r['fuel_kg'] > 0]
+    _save_fuel_csv(out_path, results_valid)
 
-    total_fuel = sum(r['fuel_kg'] for r in results)
+    total_fuel = sum(r['fuel_kg'] for r in results_valid)
+    skipped_ga    = sum(1 for cs, ac_rows in groups.items()
+                        if _is_ga(_resolve_actype(ac_rows[0].get('icao24', ''), cs)))
+    skipped_noarr = sum(1 for cs, ac_rows in groups.items()
+                        if not _is_ga(_resolve_actype(ac_rows[0].get('icao24', ''), cs))
+                        and _classify_track(ac_rows) != 'arr')
+    skipped_zero  = len(results) - len(results_valid)
     lines = [f'--- FUEL CALC: {stem} ---']
-    for r in sorted(results, key=lambda x: x['fuel_kg'], reverse=True):
+    for r in sorted(results_valid, key=lambda x: x['fuel_kg'], reverse=True):
         fl   = int(r['mean_fl'])
         mins = int(r['duration_s'] / 60)
         lines.append(
             f'{r["callsign"]:<9} {r["actype"] or "?":<5} {r["bada_model"]:<14}'
             f'  {r["fuel_kg"]:6.1f} kg  FL{fl:03d}  {mins} min'
         )
-    lines.append(f'TOTAL: {len(results)} flights | {total_fuel:.1f} kg TMA fuel')
+    lines.append(
+        f'TOTAL: {len(results_valid)} arrivals | {total_fuel:.1f} kg'
+        f'  (skipped: {skipped_ga} GA, {skipped_noarr} dep/other, {skipped_zero} no-data)'
+    )
     lines.append(f'Saved: {out_path.name}')
     for err in errors:
         lines.append(f'WARN: {err}')
@@ -263,13 +383,44 @@ def _load_actype_cache():
         pass
 
 
-def _resolve_actype(icao24: str) -> str:
-    if icao24 and icao24 in _actype_json_cache:
-        val = _actype_json_cache[icao24]
+def _resolve_actype(icao24: str, callsign: str = '') -> str:
+    key = icao24.lower() if icao24 else ''
+    if key and key in _actype_json_cache:
+        val = _actype_json_cache[key]
         tc = val.get('typecode', '') if isinstance(val, dict) else str(val)
         if tc:
             return tc.strip().upper()
+    try:
+        import sys
+        sys.path.insert(0, str(_REPO_ROOT / 'utils'))
+        from opensky_importer.actype_lookup import resolve_actype as _lookup
+        tc = _lookup(icao24, callsign, {})
+        if tc and tc != 'B738':
+            _actype_json_cache[key] = tc
+            return tc.strip().upper()
+        if tc == 'B738':
+            _actype_json_cache[key] = tc
+            return 'B738'
+    except Exception:
+        pass
     return ''
+
+
+def _enrich_actype_cache(groups: dict):
+    """Pre-fetch aircraft types for all unknown icao24 codes via actype_lookup."""
+    try:
+        import sys
+        sys.path.insert(0, str(_REPO_ROOT / 'utils'))
+        from opensky_importer.actype_lookup import resolve_actype as _lookup
+        for cs, ac_rows in groups.items():
+            icao24 = ac_rows[0].get('icao24', '').lower()
+            if not icao24:
+                continue
+            if icao24 in _actype_json_cache:
+                continue
+            _lookup(icao24, cs, {})
+    except Exception:
+        pass
 
 
 def _resolve_bada_model(actype: str) -> str:
@@ -286,6 +437,13 @@ def _resolve_bada_model(actype: str) -> str:
 # ---------------------------------------------------------------------------
 
 import xml.etree.ElementTree as ET
+
+
+def _ct_mcmb(M: float, b: list) -> float:
+    """C_T_MCMB: 6th-degree polynomial in M (JET, from BADA4 TFM/MCMB/CT)."""
+    if len(b) < 6:
+        return 0.3
+    return b[0] + b[1]*M + b[2]*M**2 + b[3]*M**3 + b[4]*M**4 + b[5]*M**5
 
 
 def _load_bada(model_name: str) -> dict:
@@ -374,6 +532,10 @@ def _load_bada(model_name: str) -> dict:
         # ti: 12 idle thrust coefficients
         ti_node = lidl.find('CT') if lidl is not None else None
         bada['ti'] = floats(ti_node, 'ti') if ti_node is not None else []
+        # b: 6 MCMB thrust coefficients C_T_MCMB(M)
+        mcmb = pfm.find('MCMB') if pfm is not None else None
+        ct_mcmb = mcmb.find('CT') if mcmb is not None else None
+        bada['b'] = floats(ct_mcmb, 'b') if ct_mcmb is not None else []
     else:
         tpm = root.find('.//PFM/TPM')
         cf_node = tpm.find('CF') if tpm is not None else None
@@ -383,7 +545,8 @@ def _load_bada(model_name: str) -> dict:
         bada['fi'] = floats(fi_node, 'fi') if fi_node is not None else []
         ti_node = lidl.find('CT') if lidl is not None else None
         bada['ti'] = floats(ti_node, 'ti') if ti_node is not None else []
-        bada['n_eng']    = int(flt(root, './/PFM/n_eng', 2.0))
+        bada['n_eng'] = int(flt(root, './/PFM/n_eng', 2.0))
+        bada['b'] = []
 
     _bada_cache[model_name] = bada
     return bada
@@ -641,6 +804,7 @@ def _calc_fuel_aircraft(rows: list, bada: dict, weather) -> dict:
     f         = bada['f']
     fi        = bada['fi']
     ti        = bada['ti']
+    b         = bada.get('b', [])
     eng_type  = bada['engine_type']
     Mmin      = bada['Mmin']
     Mmax      = bada['Mmax']
@@ -649,6 +813,14 @@ def _calc_fuel_aircraft(rows: list, bada: dict, weather) -> dict:
     dist_total_m = 0.0
     alt_sum      = 0.0
     valid_segs   = 0
+
+    # Pre-compute TAS per row for dv/dt
+    tas_arr = []
+    for r in rows:
+        alt = r['baro_alt_m']
+        T_isa, _, _, _ = _isa(max(alt, 0.0))
+        a = math.sqrt(_k * _R * T_isa)
+        tas_arr.append(max(r['velocity_ms'], 30.0))  # gs ≈ TAS (no wind); refined per-segment below
 
     for i in range(len(rows) - 1):
         r0 = rows[i]
@@ -660,13 +832,19 @@ def _calc_fuel_aircraft(rows: list, bada: dict, weather) -> dict:
         if r0['on_ground'] or r1['on_ground']:
             continue
 
-        alt = (r0['baro_alt_m'] + r1['baro_alt_m']) / 2.0
+        alt0 = r0['baro_alt_m']
+        alt1 = r1['baro_alt_m']
+        alt  = (alt0 + alt1) / 2.0
+        if alt < _FAP_ALT_M:          # stop at FAP — same as MATLAB
+            continue
         if alt < 100.0:
             continue
 
         lat = (r0['lat'] + r1['lat']) / 2.0
         lon = (r0['lon'] + r1['lon']) / 2.0
-        gs  = (r0['velocity_ms'] + r1['velocity_ms']) / 2.0
+        gs0 = r0['velocity_ms']
+        gs1 = r1['velocity_ms']
+        gs  = (gs0 + gs1) / 2.0
         trk = r0['true_track']
 
         T_isa, p_Pa, delta, theta = _isa(alt)
@@ -674,32 +852,51 @@ def _calc_fuel_aircraft(rows: list, bada: dict, weather) -> dict:
         # ERA5 temperature and wind correction
         T_era5, u_era5, v_era5 = _era5_at(weather, alt, lat, lon)
         if T_era5 is not None and T_era5 > 100.0:
-            dT    = T_era5 - T_isa
-            T_act = T_isa + dT
-            delta = (p_Pa / _p0) * (_T0 / T_act)   # re-compute with actual T
+            T_act = T_era5
+            delta = (p_Pa / _p0) * (_T0 / T_act)
             theta = T_act / _T0
             a     = math.sqrt(_k * _R * T_act)
             trk_r = math.radians(trk)
             wind_along = u_era5 * math.sin(trk_r) + v_era5 * math.cos(trk_r)
         else:
+            T_act      = T_isa
             a          = math.sqrt(_k * _R * T_isa)
             wind_along = 0.0
 
-        TAS = max(gs - wind_along, 30.0)
-        M   = max(Mmin, min(Mmax, TAS / a))
+        TAS0 = max(gs0 - wind_along, _MIN_TAS_MS)
+        TAS1 = max(gs1 - wind_along, _MIN_TAS_MS)
+        TAS  = (TAS0 + TAS1) / 2.0
+        if TAS < _MIN_TAS_MS:         # below min approach speed — skip
+            continue
+        M    = max(Mmin, min(Mmax, TAS / a))
+
+        # dh/dt and dv/dt (MATLAB energy equation)
+        dh_dt = (alt1 - alt0) / dt          # m/s  (negative = descent)
+        dv_dt = (TAS1 - TAS0) / dt          # m/s² (negative = decelerating)
 
         CL_max = _cl_max(M, bf)
         CL     = _cl(mass, delta, S, M, CL_max)
         CD     = _cd(M, CL, d, CD_scalar)
         D      = _drag(delta, S, M, CD)
 
-        # Thrust ≈ Drag (descent/cruise, no net climb acceleration)
-        Thrust = D
+        # Full energy equation: T = (m·g/TAS)·dh_dt + m·dv_dt + D
+        Thrust = (mass * _g0 / TAS) * dh_dt + mass * dv_dt + D
+
+        # Clamp to [T_idle, T_MCMB]
+        CT_idle  = _ct_idle_jet(delta, M, ti)
+        T_idle   = _thr_idle(delta, mass, CT_idle)
+
+        if b:
+            CT_mcmb = _ct_mcmb(M, b)
+            T_mcmb  = delta * mass * _g0 * CT_mcmb
+        else:
+            T_mcmb  = D * 2.5  # fallback: cap at 2.5× drag
+
+        Thrust = max(T_idle, min(T_mcmb, Thrust))
 
         CT     = _ct(Thrust, delta, mass)
         CF     = _cf_jet(CT, M, f) if eng_type == 'JET' else 0.0
 
-        # Ensure CF ≥ idle fuel coefficient
         CF_idle = _cf_idle_jet(fi, delta, M, theta) if eng_type == 'JET' else 0.0
         CF = max(CF, CF_idle)
 
@@ -715,11 +912,11 @@ def _calc_fuel_aircraft(rows: list, bada: dict, weather) -> dict:
     mean_fl    = (alt_sum / valid_segs / 30.48) if valid_segs > 0 else 0.0
 
     return {
-        'fuel_kg':    round(fuel_total, 2),
-        'duration_s': round(duration_s, 0),
+        'fuel_kg':     round(fuel_total, 2),
+        'duration_s':  round(duration_s, 0),
         'distance_nm': round(dist_nm, 1),
-        'mean_fl':    round(mean_fl, 0),
-        'n_segments': valid_segs,
+        'mean_fl':     round(mean_fl, 0),
+        'n_segments':  valid_segs,
     }
 
 

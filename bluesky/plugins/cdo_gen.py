@@ -40,6 +40,7 @@ from bluesky.plugins.fuel_calc import (
     _era5_at,
     _load_actype_cache,
     _load_release_csv,
+    _is_ga,
     _g0, _p0, _k, _T0, _a0, _R,
 )
 
@@ -61,6 +62,9 @@ _M_TO_NM    = 1.0 / 1852.0
 _KT_PER_SEC = 1.0        # speed reduction rate [kt/s] (kt_per_sec_reduce)
 _C_V_MIN    = 1.3        # stall margin factor
 _VD_DES     = [5.0, 10.0, 10.0, 10.0]   # [kt] speed deltas for bands 1-4
+
+# CDO start altitude: matches MATLAB alt_start = 2000 ft
+_CDO_START_ALT_M = 2000.0 * _FT_TO_M   # 609.6 m
 
 # ESSA airport coordinates
 _ESSA_LAT = 59.6519
@@ -141,7 +145,9 @@ def _run_cdo(csv_path: str):
             continue
 
         icao24    = ac_rows[0].get('icao24', '')
-        actype    = _resolve_actype(icao24)
+        actype    = _resolve_actype(icao24, cs)
+        if _is_ga(actype):
+            continue
         bada_name = _resolve_bada_model(actype)
 
         try:
@@ -436,6 +442,9 @@ def _interp_latlon(cum_nm, lats, lons, query_nm):
 # ---------------------------------------------------------------------------
 
 def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
+    # Clip to CDO start altitude (2000 ft) to match MATLAB alt_start
+    rows = _clip_to_cdo_start(rows)
+
     S         = bada['S']
     CD_scalar = bada['CD_scalar']
     mass      = bada['mass']
@@ -659,9 +668,23 @@ def _load_orig_fuel(stem: str) -> dict:
     return result
 
 
+def _clip_to_cdo_start(rows: list) -> list:
+    """Return the sub-track starting from the first row at or below _CDO_START_ALT_M.
+
+    MATLAB uses alt_start=2000 ft as the CDO entry point, so ORIG and CDO fuel
+    are both measured from that altitude — not from the TMA boundary.
+    If the entire track is above 2000 ft (very rare), return the last two rows.
+    """
+    for i, r in enumerate(rows):
+        if r['baro_alt_m'] <= _CDO_START_ALT_M:
+            return rows[i:] if i < len(rows) - 1 else rows[-2:]
+    return rows[-2:]
+
+
 def _orig_fuel_from_rows(rows: list, bada: dict, weather) -> float:
     from bluesky.plugins.fuel_calc import _calc_fuel_aircraft
-    res = _calc_fuel_aircraft(rows, bada, weather)
+    clipped = _clip_to_cdo_start(rows)
+    res = _calc_fuel_aircraft(clipped, bada, weather)
     return res['fuel_kg']
 
 

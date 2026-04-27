@@ -25,8 +25,10 @@ class ScenarioConverter:
         lomax: float = 20.5,
         actypedb: Optional[dict] = None,
         output_dir: Optional[Path] = None,
+        end_ts: Optional[int] = None,
     ):
         self.begin_ts = begin_ts
+        self.end_ts = end_ts
         self.airport_label = airport_label.upper()
         self.lamin = lamin
         self.lomin = lomin
@@ -45,11 +47,13 @@ class ScenarioConverter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         start_dt = datetime.fromtimestamp(self.begin_ts, tz=timezone.utc)
-        stem = f"opensky_{self.airport_label}_{start_dt.strftime('%Y%m%d_%H%M')}"
+        name_ts = self.end_ts if self.end_ts else self.begin_ts
+        name_dt = datetime.fromtimestamp(name_ts, tz=timezone.utc)
+        stem = f"opensky_{self.airport_label}_{name_dt.strftime('%Y%m%d_%H%M')}"
         out_path = self.output_dir / f"{stem}.scn"
         raw_path = self.output_dir / f"{stem}_tracks.csv"
 
-        lines = self._build_scenario(tracks, start_dt)
+        lines = self._build_scenario(tracks, start_dt, name_dt)
 
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -89,7 +93,7 @@ class ScenarioConverter:
     # Internal
     # ------------------------------------------------------------------
 
-    def _build_scenario(self, tracks: list, start_dt: datetime) -> list:
+    def _build_scenario(self, tracks: list, start_dt: datetime, name_dt: datetime) -> list:
         fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         area_desc = (
             f"{self.airport_label} TMA"
@@ -107,14 +111,14 @@ class ScenarioConverter:
         self._last_ac_count = len(high_tracks)
 
         csv_filename = (
-            f"opensky_{self.airport_label}_{start_dt.strftime('%Y%m%d_%H%M')}_tracks.csv"
+            f"opensky_{self.airport_label}_{name_dt.strftime('%Y%m%d_%H%M')}_tracks.csv"
         )
 
         header = [
             "# ==========================================================",
             "# OpenSky Historical Scenario",
             f"# Area:     {area_desc}",
-            f"# Datetime: {start_dt.strftime('%Y-%m-%d %H:%M')} UTC",
+            f"# Datetime: {name_dt.strftime('%Y-%m-%d %H:%M')} UTC",
             f"# Fetched:  {fetched_at}",
             f"# Aircraft: {self._last_ac_count} IFR  ({len(low_tracks)} low-alt excluded)",
             "# Replay:   interpolated via OPENSKY_REPLAY_PLAYER plugin",

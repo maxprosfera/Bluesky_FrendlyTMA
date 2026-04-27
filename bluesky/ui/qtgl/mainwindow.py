@@ -118,7 +118,7 @@ class DiscoveryDialog(QDialog):
             self.close()
 
 
-_ESSA_BBOX = dict(lamin=58.53, lomin=16.18, lamax=60.35, lomax=19.92)
+_ESSA_BBOX = dict(lamin=57.7512, lomin=14.6317, lamax=61.1313, lomax=21.4669)
 _PRESETS = {
     'ESSA Arlanda TMA': _ESSA_BBOX,
 }
@@ -132,6 +132,7 @@ class OpenSkyDialog(QDialog):
         self.setWindowTitle('Load OpenSky Historical Traffic')
         self.setModal(True)
         self.setMinimumWidth(420)
+        self.setMinimumHeight(480)
 
         root = QVBoxLayout(self)
 
@@ -159,16 +160,16 @@ class OpenSkyDialog(QDialog):
 
         self.time_edit = QTimeEdit(default_dt.time())
         self.time_edit.setDisplayFormat('HH:mm')
-        dt_form.addRow('Time (UTC):', self.time_edit)
+        dt_form.addRow('End Time (UTC):', self.time_edit)
 
         # Limit info
-        limit_label = QLabel('Note: standard accounts can only access live data (last 60 min).')
+        limit_label = QLabel('Note: standard accounts can only access live data (last 60 min). Historical data uses Trino API.')
         limit_label.setWordWrap(True)
         limit_label.setStyleSheet('color:#aaaaaa;font-size:10px;')
         dt_form.addRow('', limit_label)
 
         self.duration_spin = QSpinBox()
-        self.duration_spin.setRange(1, 59)
+        self.duration_spin.setRange(1, 480)
         self.duration_spin.setValue(30)
         self.duration_spin.setSuffix(' min')
         dt_form.addRow('Duration:', self.duration_spin)
@@ -265,6 +266,62 @@ class OpenSkyDialog(QDialog):
 
         cmd = f'LOADOPENSKY {dt_str} {lamin} {lomin} {lamax} {lomax} {duration}'
         stack.stack(cmd)
+        self.accept()
+
+
+class TMAOptDialog(QDialog):
+    """Dialog for running TMA optimization on historical or live OpenSky traffic."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('TMA Optimization')
+        self.setModal(True)
+        self.setMinimumWidth(380)
+
+        root = QVBoxLayout(self)
+
+        dt_group = QGroupBox('Traffic Time Window (UTC)')
+        dt_form = QFormLayout(dt_group)
+
+        from PyQt6.QtCore import QDateTime
+        now_qt = QDateTime.currentDateTimeUtc()
+        default_dt = now_qt.addSecs(-1800)
+
+        self.date_edit = QDateEdit(default_dt.date())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat('yyyy-MM-dd')
+        dt_form.addRow('Date:', self.date_edit)
+
+        self.time_edit = QTimeEdit(default_dt.time())
+        self.time_edit.setDisplayFormat('HH:mm')
+        dt_form.addRow('End Time (UTC):', self.time_edit)
+
+        self.duration_spin = QSpinBox()
+        self.duration_spin.setRange(1, 480)
+        self.duration_spin.setValue(60)
+        self.duration_spin.setSuffix(' min')
+        dt_form.addRow('Duration:', self.duration_spin)
+
+        note = QLabel('Recent data (<1 h): live REST API.  Older data: OpenSky Trino.')
+        note.setWordWrap(True)
+        note.setStyleSheet('color:#aaaaaa;font-size:10px;')
+        dt_form.addRow('', note)
+
+        root.addWidget(dt_group)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def _on_accept(self):
+        date_str = self.date_edit.date().toString('yyyy-MM-dd')
+        time_str = self.time_edit.time().toString('HH:mm')
+        dt_str   = f'{date_str}T{time_str}'
+        duration = self.duration_spin.value()
+        stack.stack(f'TMAOPT {dt_str} {duration}')
         self.accept()
 
 
@@ -687,6 +744,8 @@ class MainWindow(QMainWindow, Base):
             stack.stack('FUELCALC')
         elif self.sender() == self.custom4:
             stack.stack('CDOGEN')
+        elif self.sender() == self.custom5:
+            self._open_tmaopt_dialog()
         elif hasattr(self.sender(), 'server_id'):
             bs.net.send(b'ADDNODES', 1, self.sender().server_id)
 
@@ -728,4 +787,8 @@ class MainWindow(QMainWindow, Base):
 
     def _open_opensky_dialog(self):
         dlg = OpenSkyDialog(self)
+        dlg.exec()
+
+    def _open_tmaopt_dialog(self):
+        dlg = TMAOptDialog(self)
         dlg.exec()

@@ -145,7 +145,9 @@ class OpenSkyFetcher:
             client_id = os.environ.get("OPENSKY_CLIENT_ID", "")
         if not client_secret:
             client_secret = os.environ.get("OPENSKY_CLIENT_SECRET", "")
-        self._tokens = TokenManager(client_id, client_secret)
+        self._tokens = None
+        if client_id and client_secret:
+            self._tokens = TokenManager(client_id, client_secret)
 
     # ------------------------------------------------------------------
     # Public API
@@ -159,14 +161,7 @@ class OpenSkyFetcher:
 
         if age_s > _MAX_STATE_AGE_S:
             warnings.append(
-                f"ERROR: Requested start time is {age_s // 60} minutes ago. "
-                "Authenticated users can access /states/all up to 1 hour in the past. "
-                "For older data use the OpenSky Trino interface. "
-                "Please select a time within the last 55 minutes."
-            )
-        if end_ts - begin_ts > 7200:
-            warnings.append(
-                "ERROR: Duration exceeds 2 hours. Please use 120 minutes or less."
+                f"INFO: Requested start time is {age_s // 60} minutes ago — using OpenSky Trino API for historical data."
             )
         return warnings
 
@@ -194,6 +189,98 @@ class OpenSkyFetcher:
             f"(area={area:.1f} sq deg, duration={duration_s // 60} min)"
         )
 
+    def fetch_area_flights_trino(
+        self,
+        begin_ts: int,
+        end_ts: int,
+        lamin: float,
+        lomin: float,
+        lamax: float,
+        lomax: float,
+    ) -> list:
+        """
+        Fetch historical flight tracks via pyopensky Trino (handles OAuth automatically).
+        Returns list of FlightTrack objects.
+        """
+        try:
+            from pyopensky.trino import Trino
+            import pandas as pd
+        except ImportError:
+            log.error("pyopensky not installed. Run: pip3 install pyopensky")
+            return []
+
+        import datetime as dt
+
+        start_dt = dt.datetime.fromtimestamp(begin_ts, tz=dt.timezone.utc)
+        stop_dt  = dt.datetime.fromtimestamp(end_ts,   tz=dt.timezone.utc)
+        bounds   = (lomin, lamin, lomax, lamax)  # pyopensky: (west, south, east, north)
+
+        try:
+            trino = Trino()
+            log.info("Querying pyopensky Trino: %s → %s bbox=%s", start_dt, stop_dt, bounds)
+            df = trino.history(start_dt, stop_dt, bounds=bounds)
+        except Exception as e:
+            log.error("pyopensky Trino error: %s", e)
+            return []
+
+        if df is None or (hasattr(df, '__len__') and len(df) == 0):
+            log.warning("pyopensky Trino returned no data.")
+            return []
+
+        # Group by icao24 and build FlightTrack objects
+        aircraft: dict = {}
+        for _, row in df.iterrows():
+            import pandas as pd
+            icao24   = '' if pd.isna(row.get('icao24'))   else str(row.get('icao24', '')).strip().lower()
+            callsign = '' if pd.isna(row.get('callsign')) else str(row.get('callsign', '')).strip()
+            if not icao24:
+                continue
+
+            try:
+                ts_raw = row['time']
+                ts = int(ts_raw.timestamp()) if hasattr(ts_raw, 'timestamp') else int(ts_raw)
+                lat      = float(row['lat'])
+                lon      = float(row['lon'])
+                velocity = float(row.get('velocity') or 0.0)
+                heading  = float(row.get('heading')  or 0.0)
+                vertrate = float(row.get('vertrate')  or 0.0)
+                baro_alt = float(row.get('baroaltitude') or 0.0)
+                og_val = row.get('onground')
+                on_ground = False if (og_val is None or (hasattr(og_val, '__bool__') == False)) else bool(og_val) if not pd.isna(og_val) else False
+            except (TypeError, ValueError):
+                continue
+
+            wp = Waypoint(
+                time=ts,
+                lat=lat,
+                lon=lon,
+                baro_alt_m=baro_alt,
+                true_track=heading,
+                on_ground=on_ground,
+                velocity_ms=velocity,
+                vertical_rate_ms=vertrate,
+            )
+
+            if icao24 not in aircraft:
+                aircraft[icao24] = {'callsign': callsign, 'waypoints': []}
+            aircraft[icao24]['waypoints'].append(wp)
+
+        tracks = []
+        for icao24, info in aircraft.items():
+            airborne = [wp for wp in info['waypoints'] if not wp.on_ground]
+            if len(airborne) < 2:
+                continue
+            tracks.append(FlightTrack(
+                icao24=icao24,
+                callsign=info['callsign'] or icao24,
+                est_departure=None,
+                est_arrival=None,
+                waypoints=airborne,
+            ))
+
+        log.info("pyopensky Trino built %d tracks.", len(tracks))
+        return tracks
+
     def fetch_area_flights(
         self,
         begin_ts: int,
@@ -210,6 +297,11 @@ class OpenSkyFetcher:
         per-aircraft FlightTrack objects from the accumulated snapshots.
         """
         now = int(time.time())
+
+        # Route to Trino for data older than 1 hour (beyond REST API range)
+        if begin_ts < now - _MAX_STATE_AGE_S:
+            log.info("Request is historical (>1h ago) — using Trino API.")
+            return self.fetch_area_flights_trino(begin_ts, end_ts, lamin, lomin, lamax, lomax)
 
         # Clamp to accessible range (authenticated: last 3590 s)
         effective_begin = max(begin_ts, now - _MAX_STATE_AGE_S)
@@ -312,6 +404,8 @@ class OpenSkyFetcher:
         return states if states else []
 
     def _request(self, url: str, params: dict = None, retry: bool = True):
+        if self._tokens is None:
+            return []
         headers = self._tokens.headers()
         resp = requests.get(url, headers=headers, params=params, timeout=(5, 10))
 

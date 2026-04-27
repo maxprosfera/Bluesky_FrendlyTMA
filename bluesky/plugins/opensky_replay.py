@@ -80,15 +80,15 @@ def loadopensky(dtstr, lamin=None, lomin=None, lamax=None, lomax=None, duration=
     if duration is None:
         duration = settings.opensky_default_duration
 
-    duration = min(max(1, int(float(duration))), 59)
+    duration = max(1, int(float(duration)))
 
     try:
-        start_dt = _parse_datetime_utc(dtstr)
+        end_dt = _parse_datetime_utc(dtstr)
     except ValueError as exc:
         return False, str(exc)
 
-    begin_ts = int(timegm(start_dt.utctimetuple()))
-    end_ts = begin_ts + duration * 60
+    end_ts   = int(timegm(end_dt.utctimetuple()))
+    begin_ts = end_ts - duration * 60
 
     client_id = settings.opensky_client_id
     client_secret = settings.opensky_client_secret
@@ -105,7 +105,7 @@ def loadopensky(dtstr, lamin=None, lomin=None, lamax=None, lomax=None, duration=
             return False, w
 
     scn_root = _REPO_ROOT / 'scenario' / 'OpenSky'
-    expected_scn = scn_root / f"opensky_ESSA_{start_dt.strftime('%Y%m%d_%H%M')}.scn"
+    expected_scn = scn_root / f"opensky_ESSA_{end_dt.strftime('%Y%m%d_%H%M')}.scn"
 
     if expected_scn.exists():
         rel = str(expected_scn.relative_to(_REPO_ROOT))
@@ -147,6 +147,7 @@ def _fetch_and_convert(fetcher, begin_ts, end_ts, lamin, lomin, lamax, lomax,
 
         converter = ScenarioConverter(
             begin_ts=begin_ts,
+            end_ts=end_ts,
             airport_label=airport_label,
             lamin=lamin, lomin=lomin, lamax=lamax, lomax=lomax,
             actypedb={},
