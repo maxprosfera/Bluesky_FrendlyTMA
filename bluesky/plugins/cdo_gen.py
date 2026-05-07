@@ -256,19 +256,39 @@ def _haversine_nm(lat1, lon1, lat2, lon2) -> float:
     return R_nm * 2 * math.asin(math.sqrt(a))
 
 
+_ARR_DIST_NM = 25.0
+_DEP_DIST_NM = 25.0
+_MIN_ALT_M   = 300.0
+
+
 def _classify(rows: list) -> str:
-    if len(rows) < 4:
+    """Return 'arr', 'dep', or 'enroute'.
+
+    Uses the same strategy as opensky_traces._classify():
+      - ARR : closest approach to ESSA is in last 60% of airborne track,
+              within _ARR_DIST_NM, AND mean alt of last 20% < 4000 m
+      - DEP : closest approach in first 40%, within _DEP_DIST_NM,
+              track ends farther than it starts, AND mean alt of first 20% < 4000 m
+      - ENROUTE: everything else
+    """
+    wps = [(r['lat'], r['lon'], r['baro_alt_m'])
+           for r in rows
+           if not r['on_ground'] and r['baro_alt_m'] is not None and r['baro_alt_m'] >= _MIN_ALT_M]
+    if len(wps) < 2:
         return 'enroute'
-    alts  = [r['baro_alt_m'] for r in rows if not r['on_ground']]
-    if not alts:
+    dists = [_haversine_nm(w[0], w[1], _ESSA_LAT, _ESSA_LON) for w in wps]
+    min_d = min(dists)
+    if min_d > max(_ARR_DIST_NM, _DEP_DIST_NM):
         return 'enroute'
-    alt_trend = alts[-1] - alts[0]
-    dists = [_haversine_nm(r['lat'], r['lon'], _ESSA_LAT, _ESSA_LON)
-             for r in rows if not r['on_ground']]
-    dist_trend = dists[-1] - dists[0] if dists else 0.0
-    if alt_trend < -200 and dist_trend < 0:
+    min_idx = dists.index(min_d)
+    frac    = min_idx / max(len(wps) - 1, 1)
+    tail_n  = max(1, len(wps) // 5)
+    head_n  = max(1, len(wps) // 5)
+    mean_alt_tail = sum(w[2] for w in wps[-tail_n:]) / tail_n
+    mean_alt_head = sum(w[2] for w in wps[:head_n]) / head_n
+    if min_d <= _ARR_DIST_NM and frac >= 0.6 and mean_alt_tail < 4000.0:
         return 'arr'
-    if alt_trend > 200 and dist_trend > 0:
+    if min_d <= _DEP_DIST_NM and frac <= 0.4 and dists[-1] > dists[0] and mean_alt_head < 4000.0:
         return 'dep'
     return 'enroute'
 

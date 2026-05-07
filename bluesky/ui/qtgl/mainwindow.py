@@ -162,12 +162,6 @@ class OpenSkyDialog(QDialog):
         self.time_edit.setDisplayFormat('HH:mm')
         dt_form.addRow('End Time (UTC):', self.time_edit)
 
-        # Limit info
-        limit_label = QLabel('Note: standard accounts can only access live data (last 60 min). Historical data uses Trino API.')
-        limit_label.setWordWrap(True)
-        limit_label.setStyleSheet('color:#aaaaaa;font-size:10px;')
-        dt_form.addRow('', limit_label)
-
         self.duration_spin = QSpinBox()
         self.duration_spin.setRange(1, 480)
         self.duration_spin.setValue(30)
@@ -302,10 +296,6 @@ class TMAOptDialog(QDialog):
         self.duration_spin.setSuffix(' min')
         dt_form.addRow('Duration:', self.duration_spin)
 
-        note = QLabel('Recent data (<1 h): live REST API.  Older data: OpenSky Trino.')
-        note.setWordWrap(True)
-        note.setStyleSheet('color:#aaaaaa;font-size:10px;')
-        dt_form.addRow('', note)
 
         root.addWidget(dt_group)
 

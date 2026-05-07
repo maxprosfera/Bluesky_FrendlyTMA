@@ -13,6 +13,7 @@ Cycle:
 """
 import csv
 import json
+import math
 from pathlib import Path
 
 import bluesky as bs
@@ -110,23 +111,47 @@ def init_plugin():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _dist_deg(lat1, lon1, lat2, lon2):
-    dlat = lat1 - lat2
-    dlon = lon1 - lon2
-    return (dlat ** 2 + dlon ** 2) ** 0.5
+_ARR_DIST_NM  = 25.0   # track ends within this distance of ESSA = arrival
+_DEP_DIST_NM  = 25.0   # track starts within this distance of ESSA = departure
+_MIN_ALT_M    = 300.0  # minimum altitude to consider a point airborne
+
+
+def _haversine_nm(lat1, lon1, lat2, lon2):
+    R = 6_371_000.0; NM = 1_852.0
+    la1, lo1 = math.radians(lat1), math.radians(lon1)
+    la2, lo2 = math.radians(lat2), math.radians(lon2)
+    dlat = la2 - la1; dlon = lo2 - lo1
+    a = math.sin(dlat/2)**2 + math.cos(la1)*math.cos(la2)*math.sin(dlon/2)**2
+    return 2*R*math.asin(math.sqrt(max(0.0, min(1.0, a)))) / NM
 
 
 def _classify(wps):
-    """Return 'arr', 'dep', or 'enroute' based on altitude trend and distance to ESSA."""
+    """Return 'arr', 'dep', or 'enroute'.
+    wps: list of (lat, lon, alt_m).
+    Strategy:
+      - ARR : track's closest point to ESSA is in last 40%, within _ARR_DIST_NM,
+              AND the mean altitude of the last 20% of the track is below 4000 m
+              (ensures track is genuinely descending toward airport, not just passing)
+      - DEP : track's closest point to ESSA is in first 40%, within _DEP_DIST_NM,
+              track ends farther than it starts,
+              AND mean altitude of first 20% is below 4000 m
+      - ENROUTE: everything else
+    """
     if len(wps) < 2:
         return 'enroute'
-    first_alt  = wps[0][2]
-    last_alt   = wps[-1][2]
-    first_dist = _dist_deg(wps[0][0], wps[0][1], _ESSA_LAT, _ESSA_LON)
-    last_dist  = _dist_deg(wps[-1][0], wps[-1][1], _ESSA_LAT, _ESSA_LON)
-    if last_alt < first_alt and last_dist < first_dist:
+    dists = [_haversine_nm(w[0], w[1], _ESSA_LAT, _ESSA_LON) for w in wps]
+    min_d = min(dists)
+    if min_d > max(_ARR_DIST_NM, _DEP_DIST_NM):
+        return 'enroute'
+    min_idx = dists.index(min_d)
+    frac = min_idx / max(len(wps) - 1, 1)
+    tail_n = max(1, len(wps) // 5)
+    head_n = max(1, len(wps) // 5)
+    mean_alt_tail = sum(w[2] for w in wps[-tail_n:]) / tail_n
+    mean_alt_head = sum(w[2] for w in wps[:head_n]) / head_n
+    if min_d <= _ARR_DIST_NM and frac >= 0.6 and mean_alt_tail < 4000.0:
         return 'arr'
-    if last_alt > first_alt and last_dist > first_dist:
+    if min_d <= _DEP_DIST_NM and frac <= 0.4 and dists[-1] > dists[0] and mean_alt_head < 4000.0:
         return 'dep'
     return 'enroute'
 
@@ -285,7 +310,7 @@ def _draw_traces(show_arr: bool, show_dep: bool, only_callsigns: set = None):
                 cs = row['callsign'].strip().upper() or 'UNKN'
                 try:
                     alt = float(row['baro_alt_m']) if row['baro_alt_m'] else None
-                    if alt is None or alt <= 0:
+                    if alt is None or alt < _MIN_ALT_M:
                         continue
                     wp = (float(row['lat']), float(row['lon']), alt)
                     tracks.setdefault(cs, []).append(wp)
