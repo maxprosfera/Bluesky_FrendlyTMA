@@ -63,8 +63,13 @@ _KT_PER_SEC = 1.0        # speed reduction rate [kt/s] (kt_per_sec_reduce)
 _C_V_MIN    = 1.3        # stall margin factor
 _VD_DES     = [5.0, 10.0, 10.0, 10.0]   # [kt] speed deltas for bands 1-4
 
-# CDO start altitude: matches MATLAB alt_start = 2000 ft
-_CDO_START_ALT_M = 2000.0 * _FT_TO_M   # 609.6 m
+# CDO start altitude — from MATLAB alt_start = 2000 ft (the FAP/TMA entry limit)
+# The CDO profile is computed from the first track point DOWN to landing.
+# The horizontal (lat/lon) path is kept IDENTICAL to the observed track.
+# Only the vertical profile (alt, rocd) and speed are replaced by the
+# ideal idle-thrust CDO schedule.
+_CDO_FAP_ALT_M   = 2000.0 * _FT_TO_M    # 609.6 m  — FAP (Final Approach Point)
+_CDO_END_ALT_M   = 0.0                   # ground level
 
 # ESSA airport coordinates
 _ESSA_LAT = 59.6519
@@ -182,9 +187,7 @@ def _run_cdo(csv_path: str):
         dur_s     = len(cdo_pts)
 
         for pt in cdo_pts:
-            pt['callsign']  = cs
-            pt['icao24']    = icao24
-            pt['actype']    = actype
+            pt['actype']     = actype
             pt['bada_model'] = bada_name
         cdo_rows_all.extend(cdo_pts)
 
@@ -441,10 +444,25 @@ def _interp_latlon(cum_nm, lats, lons, query_nm):
 # Main CDO propagation loop for one aircraft
 # ---------------------------------------------------------------------------
 
-def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
-    # Clip to CDO start altitude (2000 ft) to match MATLAB alt_start
-    rows = _clip_to_cdo_start(rows)
+# ---------------------------------------------------------------------------
+# Main CDO propagation loop for one aircraft
+#
+# MATLAB approach (fuel_burn_v3.m / CDO_profile_predictor.m):
+#   - Horizontal path = identical to observed OpenSky track (same lat/lon)
+#   - Vertical profile = recomputed: idle thrust CDO from entry alt → FAP (2000ft)
+#     then level at FAP.  The fuel for the level segment below FAP is from ORIG.
+#   - "CDO fuel" = idle-thrust fuel from TMA entry altitude down to FAP
+#   - "ORIG fuel" = BADA-modelled fuel along the actual observed track from TMA
+#     entry to FAP (non-idle, follows observed ROCD)
+# ---------------------------------------------------------------------------
 
+def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
+    """Compute CDO vertical profile along the observed horizontal track.
+
+    Returns a list of per-second state dicts with the CDO altitude profile.
+    The lat/lon at each second is interpolated from the original track by
+    cumulative distance — same horizontal path, only vertical replaced.
+    """
     S         = bada['S']
     CD_scalar = bada['CD_scalar']
     mass      = bada['mass']
@@ -456,80 +474,65 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
     Mmin      = bada['Mmin']
     Mmax      = bada['Mmax']
 
-    # Build lateral path (original track, reversed: TMA-entry → airport)
-    # arrivals have rows[0] = earliest = highest alt = TMA entry
-    cum_d_orig, lats_orig, lons_orig = _build_cum_dist_nm(rows)
-    TMA_dist_nm = float(cum_d_orig[-1])
+    # Use only the portion of the track from the first point down to FAP (2000 ft)
+    # — same convention as MATLAB: CDO starts at TMA entry, ends at FAP.
+    fap_rows = []
+    for r in rows:
+        fap_rows.append(r)
+        if r['baro_alt_m'] <= _CDO_FAP_ALT_M:
+            break
+    if len(fap_rows) < 2:
+        return []
+
+    cum_d, lats, lons = _build_cum_dist_nm(fap_rows)
+    TMA_dist_nm = float(cum_d[-1])
     if TMA_dist_nm < 0.1:
         return []
 
-    # Initial conditions from first (TMA entry) row
-    r0      = rows[0]
-    alt0    = r0['baro_alt_m']
-    end_alt = max(rows[-1]['baro_alt_m'], 0.0)
+    r0   = fap_rows[0]
+    alt0 = r0['baro_alt_m']
+    fap_alt = _CDO_FAP_ALT_M
 
-    T0_k, p0_Pa, delta0, theta0 = _isa(alt0)
-    a0_ms   = math.sqrt(_k * _R * T0_k)
-    rho0    = p0_Pa / (_R * T0_k)
+    T_isa0, p0_Pa, delta0, theta0 = _isa(alt0)
+    a0_ms  = math.sqrt(_k * _R * T_isa0)
+    rho0   = p0_Pa / (_R * T_isa0)
 
-    # M_descent: from original track entry speed; clamp to [Mmin, Mmax]
-    gs0  = r0['velocity_ms']
-    TAS0 = _tas_from_cas(max(gs0, 30.0), p0_Pa, rho0)
+    gs0       = max(float(r0['velocity_ms']), 30.0)
+    TAS0      = _tas_from_cas(gs0, p0_Pa, rho0)
     M_descent = min(Mmax, max(Mmin, TAS0 / a0_ms))
-
-    # MATLAB-matching speed schedule (bands from high to low altitude):
-    # >10000ft  → hold M_descent (Mach phase)
-    # 6000-10000ft → 250 kt CAS (capped at entry CAS)
-    # 3000-6000ft  → 220 kt CAS
-    # 2000-3000ft  → stall-limited + Vd_des4
-    # 1500-2000ft  → stall-limited + Vd_des3
-    # 1000-1500ft  → stall-limited + Vd_des2
-    # <1000ft      → stall-limited + Vd_des1
-    cas_stall_ms = _cas_stall_approx(bada, mass, delta0)
     CAS_start_ms = _cas_from_tas(TAS0, p0_Pa, rho0)
+
+    cas_stall_ms = _cas_stall_approx(bada, mass, delta0)
     reduce_ms = [
-        _C_V_MIN * cas_stall_ms + _VD_DES[0] * _KT_TO_MS,       # r1  <1000 ft
-        _C_V_MIN * cas_stall_ms + _VD_DES[1] * _KT_TO_MS,       # r2  1000-1500 ft
-        _C_V_MIN * cas_stall_ms + _VD_DES[2] * _KT_TO_MS,       # r3  1500-2000 ft
-        _C_V_MIN * cas_stall_ms + _VD_DES[3] * _KT_TO_MS,       # r4  2000-3000 ft
-        min(CAS_start_ms, 220.0 * _KT_TO_MS),                    # r5  3000-6000 ft
-        min(CAS_start_ms, 250.0 * _KT_TO_MS),                    # r6  6000-10000 ft
-        CAS_start_ms,                                             # r7  >10000 ft CAS phase
+        _C_V_MIN * cas_stall_ms + _VD_DES[0] * _KT_TO_MS,
+        _C_V_MIN * cas_stall_ms + _VD_DES[1] * _KT_TO_MS,
+        _C_V_MIN * cas_stall_ms + _VD_DES[2] * _KT_TO_MS,
+        _C_V_MIN * cas_stall_ms + _VD_DES[3] * _KT_TO_MS,
+        min(CAS_start_ms, 220.0 * _KT_TO_MS),
+        min(CAS_start_ms, 250.0 * _KT_TO_MS),
+        CAS_start_ms,
     ]
     kt_per_sec_ms = _KT_PER_SEC * _KT_TO_MS
 
-    # Absolute start time from original track (Unix seconds)
-    t0_abs = int(float(r0['time']))
+    t0_abs     = int(float(r0['time']))
+    alt        = alt0
+    CAS_ms     = CAS_start_ms
+    M          = M_descent
+    cum_dist   = 0.0
+    lat, lon   = float(lats[0]), float(lons[0])
+    exit_flags = [False] * 6
+    cruise     = False
 
-    # State variables
-    alt      = alt0
-    CAS_ms   = CAS_start_ms
-    M        = M_descent
-    cum_dist = 0.0
-    lat, lon = float(lats_orig[0]), float(lons_orig[0])
-    exit_flags = [False] * 6     # e2..e7
-    level_final = False           # True once CDO has reached end_alt
+    output   = []
+    MAX_ITER = 7200
 
-    # Determine if aircraft starts in cruise or already descending
-    CL0 = _cl(mass, delta0, S, M_descent, _cl_max(M_descent, bf))
-    CD0 = _cd(M_descent, CL0, d, CD_scalar)
-    D0  = _drag(delta0, S, M_descent, CD0)
-    CT0 = _ct_idle_jet(delta0, M_descent, ti)
-    Thr0 = _thr_idle(delta0, mass, CT0)
-    rocd0 = _rocd(Thr0, D0, TAS0, mass, M_descent)
-    cruise = rocd0 >= 0
-
-    output  = []
-    MAX_STEPS = 7200
-
-    for step in range(MAX_STEPS):
+    for step in range(MAX_ITER):
         T_isa, p_Pa, delta, theta = _isa(alt)
         rho = p_Pa / (_R * T_isa)
         a   = math.sqrt(_k * _R * T_isa)
 
-        # ERA5 wind correction
         T_era5, u_era5, v_era5 = _era5_at(weather, alt, lat, lon)
-        if T_era5 is not None and T_era5 > 100.0:
+        if T_era5 and T_era5 > 100.0:
             dT    = T_era5 - T_isa
             T_act = T_isa + dT
             delta = (p_Pa / _p0) * (_T0 / T_act)
@@ -538,99 +541,63 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
             rho   = p_Pa / (_R * T_act)
         T_sound = T_era5 if (T_era5 and T_era5 > 100) else T_isa
 
-        # Wind component along track
-        if len(output) > 0:
-            trk_use = output[-1]['true_track']
+        trk_use = output[-1]['true_track'] if output else float(r0['true_track'])
+        trk_r   = math.radians(trk_use)
+        wind_along = (u_era5 * math.sin(trk_r) + v_era5 * math.cos(trk_r)) if u_era5 else 0.0
+
+        new_cas, exit_flags = _cdo_speed_step(
+            alt, M, CAS_ms, M_descent, CAS_start_ms,
+            reduce_ms, exit_flags, kt_per_sec_ms,
+        )
+        if new_cas is None:
+            M      = M_descent
+            TAS    = _tas_from_mach(M, math.sqrt(_k * _R * T_sound))
+            CAS_ms = _cas_from_tas(TAS, p_Pa, rho)
         else:
-            trk_use = r0['true_track']
-        trk_r = math.radians(trk_use)
-        wind_along = (u_era5 * math.sin(trk_r) + v_era5 * math.cos(trk_r)) if (u_era5 is not None) else 0.0
+            CAS_ms = new_cas
+            TAS    = _tas_from_cas(CAS_ms, p_Pa, rho)
+            M      = _mach_from_tas(TAS, math.sqrt(_k * _R * T_sound))
 
-        if level_final:
-            # Final level segment at end_alt: idle thrust, approach speed
-            CF_idle = _cf_idle_jet(fi, delta, M, theta)
-            FF      = _fuel_flow(delta, theta, mass, LHV, CF_idle)
-            rocd    = 0.0
-            new_alt = end_alt
-        else:
-            # Speed schedule
-            new_cas, exit_flags = _cdo_speed_step(
-                alt, M, CAS_ms, M_descent, CAS_start_ms,
-                reduce_ms, exit_flags, kt_per_sec_ms,
-            )
+        M   = max(Mmin, min(Mmax, M))
+        TAS = max(TAS, 30.0)
+        GS  = max(_gs_from_tas(TAS, wind_along), 10.0)
 
-            if new_cas is None:
-                M   = M_descent
-                TAS = _tas_from_mach(M, math.sqrt(_k * _R * T_sound))
-                GS  = _gs_from_tas(TAS, wind_along)
-                CAS_ms = _cas_from_tas(TAS, p_Pa, rho)
-            else:
-                CAS_ms = new_cas
-                TAS = _tas_from_cas(CAS_ms, p_Pa, rho)
-                GS  = _gs_from_tas(TAS, wind_along)
-                M   = _mach_from_tas(TAS, math.sqrt(_k * _R * T_sound))
+        CL_v = _cl_max(M, bf)
+        CL   = _cl(mass, delta, S, M, CL_v)
+        CD   = _cd(M, CL, d, CD_scalar)
+        D    = _drag(delta, S, M, CD)
 
-            M = max(Mmin, min(Mmax, M))
-            TAS = max(TAS, 30.0)
-            GS  = max(GS,  10.0)
+        CT_idle    = _ct_idle_jet(delta, M, ti)
+        Thr_idle_N = _thr_idle(delta, mass, CT_idle)
+        CF_idle    = _cf_idle_jet(fi, delta, M, theta)
+        FF         = _fuel_flow(delta, theta, mass, LHV, CF_idle)
 
-            CL_max_v = _cl_max(M, bf)
-            CL = _cl(mass, delta, S, M, CL_max_v)
-            CD = _cd(M, CL, d, CD_scalar)
-            D  = _drag(delta, S, M, CD)
+        rocd = _rocd(Thr_idle_N, D, TAS, mass, M)
 
-            CT_idle    = _ct_idle_jet(delta, M, ti)
-            Thr_idle_N = _thr_idle(delta, mass, CT_idle)
-            CF_idle    = _cf_idle_jet(fi, delta, M, theta)
-            FF         = _fuel_flow(delta, theta, mass, LHV, CF_idle)
-
-            rocd_idle = _rocd(Thr_idle_N, D, TAS, mass, M, is_cruise=cruise)
-
-            if cruise:
-                if rocd_idle < 0:
-                    cruise = False
-                else:
-                    rocd_idle = 0.0
-
-            # Constrain ROCD so aircraft doesn't reach end_alt too early:
-            # compute required ROCD to arrive at end_alt exactly at TMA_dist_nm
-            dist_remaining_nm = max(TMA_dist_nm - cum_dist, 0.0)
-            dist_remaining_m  = dist_remaining_nm * 1852.0
-            time_remaining_s  = dist_remaining_m / max(GS, 1.0)
-            alt_to_lose       = alt - end_alt
-            if time_remaining_s > 0.5 and alt_to_lose > 0:
-                required_rocd = -alt_to_lose / time_remaining_s   # negative = descend
-            else:
-                required_rocd = rocd_idle
-
-            # Use the shallower descent (less negative = less steep)
-            rocd = max(rocd_idle, required_rocd)
-
-            new_alt = alt + rocd * 1.0
-            if new_alt <= end_alt:
-                new_alt = end_alt
-                level_final = True
-
-        TAS = _tas_from_cas(CAS_ms, p_Pa, rho)
-        GS  = _gs_from_tas(TAS, wind_along)
-        GS  = max(GS, 10.0)
+        new_alt = alt + rocd * 1.0
+        if new_alt <= fap_alt:
+            new_alt = fap_alt
 
         cum_dist += GS * _M_TO_NM
         cum_fuel  = (output[-1]['cum_fuel_kg'] if output else 0.0) + FF
 
         prev_lat, prev_lon = lat, lon
-        lat, lon = _interp_latlon(cum_d_orig, lats_orig, lons_orig, cum_dist)
+        lat, lon = _interp_latlon(cum_d, lats, lons, cum_dist)
         trk = _bearing(prev_lat, prev_lon, lat, lon) if step > 0 else float(r0['true_track'])
 
         output.append({
+            'icao24':           r0.get('icao24', ''),
+            'callsign':         r0['callsign'],
+            'est_departure':    '',
+            'est_arrival':      '',
             'time':             t0_abs + step,
             'lat':              round(lat, 6),
             'lon':              round(lon, 6),
             'baro_alt_m':       round(alt, 1),
             'true_track':       round(trk, 1),
+            'on_ground':        False,
             'velocity_ms':      round(GS, 2),
             'vertical_rate_ms': round(rocd, 3),
-            'on_ground':        False,
             'cas_ms':           round(CAS_ms, 2),
             'mach':             round(M, 4),
             'fuel_flow_kg_s':   round(FF, 5),
@@ -640,7 +607,7 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
 
         alt = new_alt
 
-        if cum_dist >= TMA_dist_nm:
+        if cum_dist >= TMA_dist_nm or new_alt <= fap_alt:
             break
 
     return output
@@ -668,23 +635,22 @@ def _load_orig_fuel(stem: str) -> dict:
     return result
 
 
-def _clip_to_cdo_start(rows: list) -> list:
-    """Return the sub-track starting from the first row at or below _CDO_START_ALT_M.
-
-    MATLAB uses alt_start=2000 ft as the CDO entry point, so ORIG and CDO fuel
-    are both measured from that altitude — not from the TMA boundary.
-    If the entire track is above 2000 ft (very rare), return the last two rows.
-    """
-    for i, r in enumerate(rows):
-        if r['baro_alt_m'] <= _CDO_START_ALT_M:
-            return rows[i:] if i < len(rows) - 1 else rows[-2:]
-    return rows[-2:]
-
-
 def _orig_fuel_from_rows(rows: list, bada: dict, weather) -> float:
+    """Compute ORIG fuel from TMA entry → FAP using actual observed thrust.
+
+    Clips track to FAP (2000 ft), then uses fuel_calc energy equation
+    (actual thrust = energy balance clamped to [idle, MCMB]).
+    This matches MATLAB's F_burn_TMA = trapz over TMA_time_vector.
+    """
     from bluesky.plugins.fuel_calc import _calc_fuel_aircraft
-    clipped = _clip_to_cdo_start(rows)
-    res = _calc_fuel_aircraft(clipped, bada, weather)
+    fap_rows = []
+    for r in rows:
+        fap_rows.append(r)
+        if r['baro_alt_m'] <= _CDO_FAP_ALT_M:
+            break
+    if len(fap_rows) < 2:
+        fap_rows = rows[:2]
+    res = _calc_fuel_aircraft(fap_rows, bada, weather)
     return res['fuel_kg']
 
 
@@ -736,11 +702,13 @@ def _save_scn(scn_path: Path, stem: str, csv_path: Path):
 
 
 def _save_cdo_csv(out_path: Path, rows: list):
+    """Save CDO tracks in the same format as *_tracks.csv for STARTREPLAY."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fields = ['callsign', 'icao24', 'actype', 'bada_model',
-              'time', 'lat', 'lon', 'baro_alt_m', 'true_track',
-              'velocity_ms', 'vertical_rate_ms', 'on_ground',
-              'cas_ms', 'mach', 'fuel_flow_kg_s', 'cum_fuel_kg']
+    fields = [
+        'icao24', 'callsign', 'est_departure', 'est_arrival',
+        'time', 'lat', 'lon', 'baro_alt_m', 'true_track',
+        'on_ground', 'velocity_ms', 'vertical_rate_ms',
+    ]
     with open(out_path, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
         w.writeheader()
