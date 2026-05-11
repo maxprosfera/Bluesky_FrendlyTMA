@@ -472,6 +472,32 @@ def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0):
             'velocity_ms':      speed_ms,
             'vertical_rate_ms': -5.0,
         })
+
+    # Append the runway node (N_exit = 72) at ground level so the CDO profile
+    # continues all the way to landing rather than stopping at the last grid node.
+    _N_EXIT = 72
+    rwy_lat, rwy_lon = _GRID_COORDS[_N_EXIT]
+    if rows and (rows[-1]['lat'] != rwy_lat or rows[-1]['lon'] != rwy_lon):
+        last_lat, last_lon = rows[-1]['lat'], rows[-1]['lon']
+        dist_nm = _haversine_nm((last_lat, last_lon), (rwy_lat, rwy_lon))
+        dt      = dist_nm * 1852.0 / max(speed_ms, 1.0)
+        t      += dt
+        trk     = _bearing((last_lat, last_lon), (rwy_lat, rwy_lon))
+        rows.append({
+            'icao24':           '',
+            'callsign':         '',
+            'est_departure':    '',
+            'est_arrival':      '',
+            'time':             t,
+            'lat':              rwy_lat,
+            'lon':              rwy_lon,
+            'baro_alt_m':       0.0,
+            'true_track':       trk,
+            'on_ground':        True,
+            'velocity_ms':      speed_ms * 0.5,
+            'vertical_rate_ms': -5.0,
+        })
+
     return rows
 
 
@@ -811,13 +837,15 @@ def _run_cdogenopt(pkl_arg: str):
         f.write(f'00:00:00.00> POLY StockholmTMA {_STOCKHOLM_TMA_POLY}\n')
         for (i, j) in tree_links:
             if i in _GC and j in _GC:
-                f.write(f'00:00:00.00> LINE OPT_{i}_{j} CYAN '
+                f.write(f'00:00:00.00> POLYLINE OPT_{i}_{j} '
                         f'{_GC[i][0]:.5f} {_GC[i][1]:.5f} '
                         f'{_GC[j][0]:.5f} {_GC[j][1]:.5f}\n')
+                f.write(f'00:00:00.00> COLOR OPT_{i}_{j} 0 255 255\n')
         for node in merge_pts:
             if node in _GC:
-                f.write(f'00:00:00.00> CIRCLE MERGE_{node} YELLOW '
+                f.write(f'00:00:00.00> CIRCLE MERGE_{node} '
                         f'{_GC[node][0]:.5f} {_GC[node][1]:.5f} 0.05\n')
+                f.write(f'00:00:00.00> COLOR MERGE_{node} 255 255 0\n')
         f.write(f'00:00:00.00> STARTREPLAY {rel_csv}\n')
         f.write('00:00:00.00> OP\n')
 
@@ -1072,13 +1100,15 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
         f.write(f'00:00:00.00> POLY StockholmTMA {_STOCKHOLM_TMA_POLY}\n')
         for (i, j) in tree_links:
             if i in _GC and j in _GC:
-                f.write(f'00:00:00.00> LINE OPT_{i}_{j} CYAN '
+                f.write(f'00:00:00.00> POLYLINE OPT_{i}_{j} '
                         f'{_GC[i][0]:.5f} {_GC[i][1]:.5f} '
                         f'{_GC[j][0]:.5f} {_GC[j][1]:.5f}\n')
+                f.write(f'00:00:00.00> COLOR OPT_{i}_{j} 0 255 255\n')
         for node in merge_pts:
             if node in _GC:
-                f.write(f'00:00:00.00> CIRCLE MERGE_{node} YELLOW '
+                f.write(f'00:00:00.00> CIRCLE MERGE_{node} '
                         f'{_GC[node][0]:.5f} {_GC[node][1]:.5f} 0.05\n')
+                f.write(f'00:00:00.00> COLOR MERGE_{node} 255 255 0\n')
         f.write(f'00:00:00.00> STARTREPLAY {rel_csv}\n')
         f.write('00:00:00.00> OP\n')
 
@@ -1088,8 +1118,8 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
     for e in errors:
         stack.stack(f'ECHO WARN: {e}')
 
-    # Auto-load the CDO optimal scenario
-    stack.stack(f'IC scenario/TMAOpt/{stem}/{scn_path_out.name}')
+    # Auto-load the CDO optimal scenario (use absolute path to avoid resolution ambiguity)
+    stack.stack(f'IC {scn_path_out.resolve()}')
 
 
 def _parse_tma_poly_cdo():
