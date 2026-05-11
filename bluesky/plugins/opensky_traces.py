@@ -113,7 +113,7 @@ def init_plugin():
 
 _ARR_DIST_NM  = 25.0   # track ends within this distance of ESSA = arrival
 _DEP_DIST_NM  = 25.0   # track starts within this distance of ESSA = departure
-_MIN_ALT_M    = 300.0  # minimum altitude to consider a point airborne
+_MIN_ALT_M    = -200.0  # allow ground-level points (ESSA baro alt can be slightly negative)
 
 
 def _haversine_nm(lat1, lon1, lat2, lon2):
@@ -224,10 +224,12 @@ def _csv_from_scenario() -> str:
 
     # TMAOpt scenario → use historical CSV from the same folder (Trino fetch)
     # If no historical CSV exists (live mode run), there is no historical data
-    if p.stem.endswith('_tracks') and 'TMAOpt' in str(p):
-        hist = p.with_name(p.stem.replace('_tracks', '_historical') + '.csv')
-        if hist.exists():
-            return str(hist)
+    if 'TMAOpt' in str(p):
+        for suffix in ('_tracks', '_cdo_opt'):
+            if p.stem.endswith(suffix):
+                hist = p.with_name(p.stem.replace(suffix, '_historical') + '.csv')
+                if hist.exists():
+                    return str(hist)
         return ''
 
     # OpenSky or already a historical CSV

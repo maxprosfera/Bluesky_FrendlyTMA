@@ -1068,6 +1068,7 @@ def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
             'heading':     ac['heading'],
             'vertrate':    ac['vertrate'],
             'dist_to_entry_nm': dist_ep,
+            'crossing_time':    ac.get('crossing_time'),
         })
 
     # Sort each entry by distance (closest first), cap per entry, then cap total
@@ -1112,7 +1113,7 @@ def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
     with open(out_dir / 'aircraft.csv', 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=[
             'callsign','icao24','entry','node','lat','lon',
-            'alt_m','velocity_ms','heading','vertrate','dist_to_entry_nm'
+            'alt_m','velocity_ms','heading','vertrate','dist_to_entry_nm','crossing_time'
         ])
         w.writeheader()
         for d, acs in aircraft_by_entry.items():

@@ -433,12 +433,16 @@ def _find_latest_result_pkl(pkl_arg: str):
     return None
 
 
-def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0):
+def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0, entry_alt_m=None):
     """Build a list of row-dicts along a grid node path.
 
     Each row represents a waypoint at the node position. Timestamps are
     assigned by propagating time forward using the given speed between nodes.
     Used as the 'rows' argument to _cdo_for_aircraft.
+
+    entry_alt_m: actual aircraft altitude at TMA entry (from OpenSky). Used as
+    the altitude of the first (entry) node so _cdo_for_aircraft knows how high
+    to integrate backward. If None, defaults to 6096 m (FL200).
     """
     import sys as _sys
     _REPO_ROOT_STR = str(_REPO_ROOT)
@@ -446,8 +450,12 @@ def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0):
         _sys.path.insert(0, _REPO_ROOT_STR)
     from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm, _bearing
 
+    _DEFAULT_ENTRY_ALT_M = 6096.0   # FL200 — sensible TMA entry altitude
+    alt_entry = float(entry_alt_m) if entry_alt_m and entry_alt_m > 0 else _DEFAULT_ENTRY_ALT_M
+
     rows = []
     t    = float(ref_time_unix)
+    n    = len(node_list)
     for i, node_id in enumerate(node_list):
         lat, lon = _GRID_COORDS[node_id]
         if i > 0:
@@ -458,6 +466,10 @@ def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0):
             trk     = _bearing((prev_lat, prev_lon), (lat, lon))
         else:
             trk = 0.0
+        # Linearly interpolate altitude from entry (alt_entry) down to FAP (609.6 m)
+        # so _cdo_for_aircraft sees a realistic descending track, not a flat 3000 m sheet.
+        frac     = i / max(n - 1, 1)
+        node_alt = alt_entry + frac * (_CDO_FAP_ALT_M - alt_entry)
         rows.append({
             'icao24':           '',
             'callsign':         '',
@@ -466,7 +478,7 @@ def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0):
             'time':             t,
             'lat':              lat,
             'lon':              lon,
-            'baro_alt_m':       3000.0,
+            'baro_alt_m':       node_alt,
             'true_track':       trk,
             'on_ground':        False,
             'velocity_ms':      speed_ms,
@@ -602,8 +614,10 @@ def _run_cdoprecompute(pkl_arg: str):
         u_table[ac_idx]    = {}
         fuel_table[ac_idx] = {}
 
+        entry_alt_m = ac.get('alt_m') or ac.get('baro_alt_m')
         for path_idx, node_list in enumerate(all_paths):
-            rows = _grid_rows_from_nodes(node_list, ref_unix, speed_ms=speed_ms)
+            rows = _grid_rows_from_nodes(node_list, ref_unix, speed_ms=speed_ms,
+                                         entry_alt_m=entry_alt_m)
             if not rows:
                 continue
             rows[0]['icao24']   = icao24
@@ -737,7 +751,9 @@ def _run_cdogenopt(pkl_arg: str):
             hour=0, minute=0, second=0, microsecond=0)
         entry_unix = midnight.timestamp() + entry_min * 60.0
 
-        rows = _grid_rows_from_nodes(node_list, entry_unix, speed_ms=speed_ms)
+        entry_alt_m = ac.get('alt_m') or ac.get('baro_alt_m')
+        rows = _grid_rows_from_nodes(node_list, entry_unix, speed_ms=speed_ms,
+                                     entry_alt_m=entry_alt_m)
         if not rows:
             errors.append(f'{cs}: empty path rows')
             continue
@@ -817,6 +833,22 @@ def _run_cdogenopt(pkl_arg: str):
     _save_cdo_csv(combined_csv, all_cdo_rows)
     _save_summary_csv(sum_csv, summary)
 
+    fuel_csv = out_dir / f'{stem}_fuel_consumption.csv'
+    with open(fuel_csv, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['callsign', 'orig_fuel_kg', 'cdo_fuel_kg',
+                    'saving_kg', 'saving_pct', 'duration_s', 'distance_nm'])
+        for s in summary:
+            w.writerow([
+                s['callsign'],
+                s['orig_fuel_kg'],
+                s['cdo_fuel_kg'],
+                s['fuel_saving_kg'],
+                s['fuel_saving_pct'],
+                s['duration_s'],
+                s['distance_nm'],
+            ])
+
     # Write SCN: TMA polygon + TMAOpt tree links + CDO replay
     rel_csv = combined_csv.relative_to(_REPO_ROOT).as_posix()
     tree_links  = result.get('tree_links', [])
@@ -844,7 +876,7 @@ def _run_cdogenopt(pkl_arg: str):
         for node in merge_pts:
             if node in _GC:
                 f.write(f'00:00:00.00> CIRCLE MERGE_{node} '
-                        f'{_GC[node][0]:.5f} {_GC[node][1]:.5f} 0.05\n')
+                        f'{_GC[node][0]:.5f} {_GC[node][1]:.5f} 1\n')
                 f.write(f'00:00:00.00> COLOR MERGE_{node} 255 255 0\n')
         f.write(f'00:00:00.00> STARTREPLAY {rel_csv}\n')
         f.write('00:00:00.00> OP\n')
@@ -862,6 +894,86 @@ def _run_cdogenopt(pkl_arg: str):
 # ---------------------------------------------------------------------------
 # Inline versions called directly from _run_tmaopt (no threading, no pkl I/O)
 # ---------------------------------------------------------------------------
+
+def _precompute_one_aircraft(args):
+    """Top-level worker: compute u/fuel for one aircraft across all paths.
+    Must be a module-level function so ProcessPoolExecutor can pickle it.
+    Returns (ac_idx, u_dict, fuel_dict).
+    """
+    (ac_idx, ac, all_paths, ref_unix, mlw_factor, weather) = args
+
+    import sys as _sys
+    _REPO_ROOT_STR = str(_REPO_ROOT)
+    if _REPO_ROOT_STR not in _sys.path:
+        _sys.path.insert(0, _REPO_ROOT_STR)
+    from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm
+
+    cs       = ac.get('callsign', f'AC{ac_idx}')
+    icao24   = ac.get('icao24', '')
+    speed_ms = ac.get('velocity_ms', 200.0)
+    entry_alt_m = ac.get('alt_m') or ac.get('baro_alt_m')
+
+    actype    = _resolve_actype(icao24, cs)
+    bada_name = _resolve_bada_model(actype)
+    try:
+        bada = _load_bada(bada_name)
+    except Exception:
+        try:
+            bada = _load_bada('B738W26')
+        except Exception:
+            return ac_idx, {}, {}
+
+    bada_work = dict(bada)
+    if 'mlw' in bada_work:
+        bada_work['mass'] = bada_work['mlw'] * mlw_factor
+
+    u_dict    = {}
+    fuel_dict = {}
+
+    for path_idx, node_list in enumerate(all_paths):
+        rows = _grid_rows_from_nodes(node_list, ref_unix, speed_ms=speed_ms,
+                                     entry_alt_m=entry_alt_m)
+        if not rows:
+            continue
+        rows[0]['icao24']   = icao24
+        rows[0]['callsign'] = cs
+
+        try:
+            cdo_pts = _cdo_for_aircraft(rows, bada_work, weather)
+        except Exception:
+            cdo_pts = []
+
+        node_dists = [0.0]
+        for i in range(1, len(node_list)):
+            d = _haversine_nm(_GRID_COORDS[node_list[i-1]], _GRID_COORDS[node_list[i]])
+            node_dists.append(node_dists[-1] + d)
+
+        if not cdo_pts:
+            edges = []
+            for i in range(1, len(node_dists)):
+                seg_nm = node_dists[i] - node_dists[i-1]
+                edges.append(max(1, round(seg_nm / (speed_ms * 0.000539957) / 60.0)))
+            u_dict[path_idx]    = edges
+            fuel_dict[path_idx] = 0.0
+            continue
+
+        edge_times = []
+        for i in range(1, len(node_dists)):
+            d0, d1 = node_dists[i-1], node_dists[i]
+            pts_in = [pt for pt in cdo_pts if d0 <= pt['cum_dist_nm'] <= d1]
+            if len(pts_in) >= 2:
+                dt_min = max(1, round((pts_in[-1]['time'] - pts_in[0]['time']) / 60.0))
+            else:
+                seg_nm = d1 - d0
+                avg_gs = (sum(pt['velocity_ms'] for pt in cdo_pts) / len(cdo_pts)) * 0.000539957 * 3600
+                dt_min = max(1, round(seg_nm / avg_gs * 60.0))
+            edge_times.append(dt_min)
+
+        u_dict[path_idx]    = edge_times
+        fuel_dict[path_idx] = cdo_pts[-1]['cum_fuel_kg']
+
+    return ac_idx, u_dict, fuel_dict
+
 
 def _run_cdoprecompute_inline(result: dict):
     """CDO precompute called inline from _run_tmaopt.
@@ -900,71 +1012,29 @@ def _run_cdoprecompute_inline(result: dict):
 
     from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm
 
-    for ac_idx, ac in enumerate(all_ac):
-        cs       = ac.get('callsign', f'AC{ac_idx}')
-        icao24   = ac.get('icao24', '')
-        speed_ms = ac.get('velocity_ms', 200.0)
+    import concurrent.futures, os
+    n_workers = max(1, min(os.cpu_count() or 4, n_ac))
 
-        actype    = _resolve_actype(icao24, cs)
-        bada_name = _resolve_bada_model(actype)
-        try:
-            bada = _load_bada(bada_name)
-        except Exception:
+    args_list = [
+        (ac_idx, ac, all_paths, ref_unix, mlw_factor, weather)
+        for ac_idx, ac in enumerate(all_ac)
+    ]
+
+    completed = 0
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_precompute_one_aircraft, args): args[0]
+                   for args in args_list}
+        for fut in concurrent.futures.as_completed(futures):
             try:
-                bada = _load_bada('B738W26')
-            except Exception:
-                continue
-
-        bada_work = dict(bada)
-        if 'mlw' in bada_work:
-            bada_work['mass'] = bada_work['mlw'] * mlw_factor
-
-        u_table[ac_idx]    = {}
-        fuel_table[ac_idx] = {}
-
-        for path_idx, node_list in enumerate(all_paths):
-            rows = _grid_rows_from_nodes(node_list, ref_unix, speed_ms=speed_ms)
-            if not rows:
-                continue
-            rows[0]['icao24']   = icao24
-            rows[0]['callsign'] = cs
-
-            try:
-                cdo_pts = _cdo_for_aircraft(rows, bada_work, weather)
-            except Exception:
-                cdo_pts = []
-
-            node_dists = [0.0]
-            for i in range(1, len(node_list)):
-                d = _haversine_nm(_GRID_COORDS[node_list[i-1]], _GRID_COORDS[node_list[i]])
-                node_dists.append(node_dists[-1] + d)
-
-            if not cdo_pts:
-                edges = []
-                for i in range(1, len(node_dists)):
-                    seg_nm = node_dists[i] - node_dists[i-1]
-                    edges.append(max(1, round(seg_nm / (speed_ms * 0.000539957) / 60.0)))
-                u_table[ac_idx][path_idx]    = edges
-                fuel_table[ac_idx][path_idx] = 0.0
-                continue
-
-            edge_times = []
-            for i in range(1, len(node_dists)):
-                d0, d1 = node_dists[i-1], node_dists[i]
-                pts_in = [pt for pt in cdo_pts if d0 <= pt['cum_dist_nm'] <= d1]
-                if len(pts_in) >= 2:
-                    dt_min = max(1, round((pts_in[-1]['time'] - pts_in[0]['time']) / 60.0))
-                else:
-                    seg_nm = d1 - d0
-                    avg_gs = (sum(pt['velocity_ms'] for pt in cdo_pts) / len(cdo_pts)) * 0.000539957 * 3600
-                    dt_min = max(1, round(seg_nm / avg_gs * 60.0))
-                edge_times.append(dt_min)
-
-            u_table[ac_idx][path_idx]    = edge_times
-            fuel_table[ac_idx][path_idx] = cdo_pts[-1]['cum_fuel_kg']
-
-        if (ac_idx + 1) % 3 == 0 or ac_idx == n_ac - 1:
-            stack.stack(f'ECHO TMAOPT: CDO precompute — {ac_idx+1}/{n_ac} done ...')
+                ac_idx, u_dict, fuel_dict = fut.result()
+            except Exception as _e:
+                ac_idx = futures[fut]
+                u_dict, fuel_dict = {}, {}
+            u_table[ac_idx]    = u_dict
+            fuel_table[ac_idx] = fuel_dict
+            completed += 1
+            if completed % 3 == 0 or completed == n_ac:
+                stack.stack(f'ECHO TMAOPT: CDO precompute — {completed}/{n_ac} done ...')
 
     _restore_cdo_params(old_params)
     return u_table, fuel_table
@@ -1010,7 +1080,9 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
         speed_ms = ac.get('velocity_ms', 200.0)
         entry_unix = midnight.timestamp() + entry_min * 60.0
 
-        rows = _grid_rows_from_nodes(node_list, entry_unix, speed_ms=speed_ms)
+        entry_alt_m = ac.get('alt_m') or ac.get('baro_alt_m')
+        rows = _grid_rows_from_nodes(node_list, entry_unix, speed_ms=speed_ms,
+                                     entry_alt_m=entry_alt_m)
         if not rows:
             errors.append(f'{cs}: empty path rows')
             continue
@@ -1081,6 +1153,22 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
     _save_cdo_csv(combined_csv, all_cdo_rows)
     _save_summary_csv(sum_csv, summary)
 
+    fuel_csv = out_dir / f'{stem}_fuel_consumption.csv'
+    with open(fuel_csv, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['callsign', 'orig_fuel_kg', 'cdo_fuel_kg',
+                    'saving_kg', 'saving_pct', 'duration_s', 'distance_nm'])
+        for s in summary:
+            w.writerow([
+                s['callsign'],
+                s['orig_fuel_kg'],
+                s['cdo_fuel_kg'],
+                s['fuel_saving_kg'],
+                s['fuel_saving_pct'],
+                s['duration_s'],
+                s['distance_nm'],
+            ])
+
     rel_csv    = combined_csv.relative_to(_REPO_ROOT).as_posix()
     tree_links = result.get('tree_links', [])
     merge_pts  = result.get('merge_points', [])
@@ -1107,7 +1195,7 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
         for node in merge_pts:
             if node in _GC:
                 f.write(f'00:00:00.00> CIRCLE MERGE_{node} '
-                        f'{_GC[node][0]:.5f} {_GC[node][1]:.5f} 0.05\n')
+                        f'{_GC[node][0]:.5f} {_GC[node][1]:.5f} 1\n')
                 f.write(f'00:00:00.00> COLOR MERGE_{node} 255 255 0\n')
         f.write(f'00:00:00.00> STARTREPLAY {rel_csv}\n')
         f.write('00:00:00.00> OP\n')
@@ -1554,24 +1642,17 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
     Mmin      = bada['Mmin']
     Mmax      = bada['Mmax']
 
-    # Clip track to FAP — CDO runs from first track point down to FAP.
-    fap_rows = []
-    for r in rows:
-        fap_rows.append(r)
-        if r['baro_alt_m'] <= _CDO_FAP_ALT_M:
-            break
-    # If all points are already below FAP, use all rows (short final segment)
-    if len(fap_rows) < 2:
-        fap_rows = list(rows)
-    if len(fap_rows) < 2:
+    # Use the full track from TMA entry to runway — matching MATLAB CDO_profile_predictor
+    # which feeds the complete reversed track and stops only when TMA_dist is covered.
+    if len(rows) < 2:
         return []
 
-    cum_d, lats, lons = _build_cum_dist_nm(fap_rows)
+    cum_d, lats, lons = _build_cum_dist_nm(rows)
     TMA_dist_nm = float(cum_d[-1])
     if TMA_dist_nm < 0.1:
         return []
 
-    r0      = fap_rows[0]
+    r0      = rows[0]
     fap_alt = _CDO_FAP_ALT_M
 
     # -----------------------------------------------------------------------
@@ -1690,7 +1771,7 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
         alt      = alt - rocd * 1.0   # rocd is negative during descent, so alt increases
         cum_dist += GS * _M_TO_NM
 
-        if cum_dist >= TMA_dist_nm or alt >= r0['baro_alt_m'] * 1.05:
+        if cum_dist >= TMA_dist_nm:
             break
 
     if not backward:
