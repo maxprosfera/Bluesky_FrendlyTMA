@@ -467,10 +467,16 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     n_medium = len(C2)
     stack.stack(f'ECHO TMAOPT: Wake categories — Heavy: {n_heavy}, Medium/Light: {n_medium}')
 
-    # ── Time horizon: centred on earliest arrival, 70-min window ──
-    all_arr    = list(ta1.values())
-    T_start    = min(all_arr) - 5
-    T_end      = T_start + 70
+    # ── Time horizon: span actual arrivals + small buffer ──
+    all_arr = list(ta1.values())
+    arr_min = min(all_arr)
+    arr_max = max(all_arr)
+    T_start = arr_min - 5
+    # Window must cover latest arrival + max possible travel time (path_len * max_u * epsilon)
+    max_path_len  = max((len(all_paths[k]) - 1) for k in range(len(all_paths))) if all_paths else 14
+    max_u_val     = max((u.get((a, pl, st), 2) for a in A_used for pl in range(5,16) for st in range(1,16)), default=2)
+    travel_buffer = max_path_len * max_u_val + epsilon * 2
+    T_end   = max(arr_max + travel_buffer, arr_min + 30) + 5
 
     # TimeLimit: use override from dialog if provided, else scale with epsilon + aircraft count
     n_ac = len(A_used)
@@ -492,33 +498,46 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
 
     def _path_node_time_exact(xi):
         pnt_xi = {}; pnt = {}
-        for t in range(T_start - 10, T_end + 10):
-            for i in NODES:
-                for j in range(len(B)):
-                    for a in AC[B[j]]:
-                        lst = []; lst_xi = []
-                        for k in paths_node[i]:
-                            if ent_i_paths_no[j] <= k < ent_i_paths_no[j + 1]:
-                                if t <= xi[a, k, i] <= t + s - 1:
-                                    lst.append(k)
-                                if xi[a, k, i] == t:
-                                    lst_xi.append(k)
-                        pnt[a, i, t]    = lst
-                        pnt_xi[a, i, t] = lst_xi
+        # Build by inverting xi: group (a,k,i) -> t, then fill lookup dicts
+        # Much faster than scanning all (t,node,ac) combinations
+        by_a_i = {}  # (a,i) -> list of (t, k)
+        for (a, k, i), t in xi.items():
+            by_a_i.setdefault((a, i), []).append((t, k))
+        # pre-fill empty
+        for j in range(len(B)):
+            for a in AC[B[j]]:
+                for i in NODES:
+                    pnt[a, i, 0]    = []   # sentinel; real keys filled below
+                    pnt_xi[a, i, 0] = []
+        for (a, i), pairs in by_a_i.items():
+            for t_node, k in pairs:
+                for t in range(max(T_start - 10, t_node - s + 1), t_node + 1):
+                    if T_start - 10 <= t <= T_end + 10:
+                        pnt.setdefault((a, i, t), []).append(k)
+                pnt_xi.setdefault((a, i, t_node), []).append(k)
+        # ensure every (a,i,t) key exists (empty list default)
+        for j in range(len(B)):
+            for a in AC[B[j]]:
+                for i in NODES:
+                    for t in range(T_start - 10, T_end + 10):
+                        pnt.setdefault((a, i, t), [])
+                        pnt_xi.setdefault((a, i, t), [])
         return pnt, pnt_xi
 
     def _path_node_time_sigma(xi, sigma, ACj):
         pnt = {}
-        for t in range(T_start - 10, T_end + 10):
-            for i in NODES:
-                for j in range(len(B)):
-                    for a in ACj[B[j]]:
-                        lst = []
-                        for k in paths_node[i]:
-                            if ent_i_paths_no[j] <= k < ent_i_paths_no[j + 1]:
-                                if t <= xi[a, k, i] <= t + sigma - 1:
-                                    lst.append(k)
-                        pnt[a, i, t] = lst
+        by_a_i = {}
+        for (a, k, i), t in xi.items():
+            by_a_i.setdefault((a, i), []).append((t, k))
+        for j in range(len(B)):
+            for a in ACj[B[j]]:
+                for i in NODES:
+                    for t_node, k in by_a_i.get((a, i), []):
+                        for t in range(max(T_start - 10, t_node - sigma + 1), t_node + 1):
+                            if T_start - 10 <= t <= T_end + 10:
+                                pnt.setdefault((a, i, t), []).append(k)
+                    for t in range(T_start - 10, T_end + 10):
+                        pnt.setdefault((a, i, t), [])
         return pnt
 
     xi = _find_trajectories(u)
@@ -537,6 +556,10 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     model = gp.Model('TMAOpt')
     model.setParam('OutputFlag', 0)
     model.setParam('TimeLimit', time_limit)
+    model.setParam('Threads', min(8, os.cpu_count() or 4))
+    model.setParam('MIPGap', 0.01)
+    model.setParam('MIPFocus', 1)
+    model.setParam('Heuristics', 0.3)
 
     rho   = model.addVars(range(path_no), vtype=GRB.BINARY)
     X_new = model.addVars(LINKS, vtype=GRB.BINARY)

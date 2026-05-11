@@ -1173,7 +1173,7 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
     tree_links = result.get('tree_links', [])
     merge_pts  = result.get('merge_points', [])
 
-    from bluesky.plugins.tma_opt import _GRID_COORDS as _GC
+    from bluesky.plugins.tma_opt import _GRID_COORDS as _GC, _write_grid_to_scn
 
     with open(scn_path_out, 'w') as f:
         f.write(f'# CDO-Optimal Scenario — {stem}\n')
@@ -1186,6 +1186,7 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
         f.write('00:00:00.00> SWRAD APT 0\n')
         f.write('00:00:00.00> SWRAD SAT 0\n')
         f.write(f'00:00:00.00> POLY StockholmTMA {_STOCKHOLM_TMA_POLY}\n')
+        _write_grid_to_scn(f, result.get('LINKS', []))
         for (i, j) in tree_links:
             if i in _GC and j in _GC:
                 f.write(f'00:00:00.00> POLYLINE OPT_{i}_{j} '
