@@ -152,10 +152,35 @@ def init_plugin():
 
 # ── Stack command ────────────────────────────────────────────────────────────
 @stack.command
-def tmaopt(dtstr: str = '', duration: int = 60):
-    """[datetime] [duration_min] — Optimise TMA entry using OpenSky Trino historical data."""
+def tmaopt(dtstr: str = '', duration: int = 60, entries: str = 'NESW',
+           max_ac: int = 15, max_ac_per_entry: int = 5,
+           max_eps: int = 3, time_limit_per_eps: int = 120,
+           s1: int = 2, s2: int = 3, fetch_radius: int = 50,
+           cdo_args: 'string' = ''):
+    """[datetime] [duration_min] [entries] [max_ac] [max_ac_per_entry] [max_eps]
+    [time_limit_s] [s1] [s2] [fetch_radius_nm] [cdo_fap_alt cdo_ias_start
+    cdo_ias_restrict cdo_mach cdo_mlw cdo_kt_per_sec cdo_wind cdo_c_v_min]
+    Optimise TMA entry using OpenSky Trino historical data."""
     stack.stack('ECHO TMAOPT: Starting ...')
-    t = threading.Thread(target=_run_tmaopt, args=(dtstr, duration), daemon=True)
+    # Parse CDO params from the trailing space-separated string
+    _CDO_DEFAULTS = [2000, 200, 220, 0.84, 0.9, 1.0, 1, 1.23]
+    _CDO_KEYS     = ['fap_alt_ft', 'ias_start_kt', 'ias_restrict_kt',
+                     'mach', 'mlw_factor', 'kt_per_sec', 'wind_temp', 'c_v_min']
+    parts = cdo_args.strip().split() if cdo_args.strip() else []
+    vals  = []
+    for i, default in enumerate(_CDO_DEFAULTS):
+        try:
+            vals.append(type(default)(parts[i]))
+        except (IndexError, ValueError):
+            vals.append(default)
+    cdo_params = dict(zip(_CDO_KEYS, vals))
+    cdo_params['wind_temp'] = bool(int(cdo_params['wind_temp']))
+    t = threading.Thread(
+        target=_run_tmaopt,
+        args=(dtstr, duration, entries.upper(), max_ac, max_ac_per_entry,
+              max_eps, time_limit_per_eps, s1, s2, fetch_radius, cdo_params),
+        daemon=True,
+    )
     t.start()
 
 
@@ -232,7 +257,56 @@ def _point_in_tma(lat, lon):
     return inside
 
 
-# ── Aircraft classification ──────────────────────────────────────────────────
+# Grid bounding box derived from _GRID_COORDS extremes
+_GRID_LAT_MIN = 58.801
+_GRID_LAT_MAX = 60.2646
+_GRID_LON_MIN = 16.7003
+_GRID_LON_MAX = 19.1261
+
+
+def _point_in_grid(lat, lon):
+    """Return True if (lat, lon) is inside the grid bounding box."""
+    return (_GRID_LAT_MIN <= lat <= _GRID_LAT_MAX and
+            _GRID_LON_MIN <= lon <= _GRID_LON_MAX)
+
+
+def _grid_crossing_time(wps):
+    """Return the interpolated Unix timestamp when the track crosses the grid boundary.
+
+    Scans consecutive waypoint pairs for the first outside→inside transition and
+    linearly interpolates the crossing time between those two waypoints.
+    Falls back to the time of the first inside waypoint if no clean transition is found,
+    or None if the track never enters the grid.
+    """
+    for i in range(len(wps) - 1):
+        outside = not _point_in_grid(wps[i].lat, wps[i].lon)
+        inside  = _point_in_grid(wps[i+1].lat, wps[i+1].lon)
+        if outside and inside:
+            t0, t1 = float(wps[i].time), float(wps[i+1].time)
+            if t1 <= t0:
+                return t1
+            # Linear interpolation: fraction along segment where boundary is crossed
+            # Use lon as proxy axis for E/W entries and lat for N/S entries
+            la0, lo0 = wps[i].lat,   wps[i].lon
+            la1, lo1 = wps[i+1].lat, wps[i+1].lon
+            dlat = la1 - la0
+            dlon = lo1 - lo0
+            # Find fraction f such that (la0+f*dlat, lo0+f*dlon) is on the boundary
+            fracs = []
+            if abs(dlat) > 1e-9:
+                fracs.append((_GRID_LAT_MIN - la0) / dlat)
+                fracs.append((_GRID_LAT_MAX - la0) / dlat)
+            if abs(dlon) > 1e-9:
+                fracs.append((_GRID_LON_MIN - lo0) / dlon)
+                fracs.append((_GRID_LON_MAX - lo0) / dlon)
+            valid = [f for f in fracs if 0.0 <= f <= 1.0]
+            f = min(valid) if valid else 0.0
+            return t0 + f * (t1 - t0)
+    # No outside→inside transition found; return time of first inside waypoint
+    first_inside = next((wp for wp in wps if _point_in_grid(wp.lat, wp.lon)), None)
+    return float(first_inside.time) if first_inside else None
+
+
 def _assign_entry(lat, lon):
     """Assign aircraft to the closest FrendlyTMA entry node."""
     best_dir  = None
@@ -253,7 +327,17 @@ def _eta_to_entry_min(lat, lon, velocity_ms, entry_latlon):
 
 
 # ── Optimisation (exact replication of run_scenario.py logic) ────────────────
-def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2):
+def _get_all_paths():
+    """Load and return all_paths from the grid pkl (no MIP solving)."""
+    pkl_paths = str(_FRENDLY_CODE / 'Paths_with_max14edges.pkl')
+    with open(pkl_paths, 'rb') as f:
+        _all_paths_entry = pickle.load(f)
+        all_paths        = pickle.load(f)
+    return all_paths
+
+
+def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_override=None, s1=2, s2=3,
+                      u_override=None):
     try:
         import gurobipy as gp
         from gurobipy import GRB
@@ -286,9 +370,8 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2):
         paths_on_links  = pickle.load(f); paths_node = pickle.load(f)
 
     # ── Separation constants ──
-    s  = 2   # general occupancy window (slots)
-    s1 = 2   # Heavy–Heavy minimum separation (min)
-    s2 = 3   # Heavy–Medium or Medium–Medium minimum separation (min)
+    s  = s1  # general occupancy window — tied to Heavy–Heavy separation
+    # s1, s2 come from caller (dialog parameters)
 
     # ── Map B node → direction string ──
     _node_to_dir = {9: 'N', 45: 'W', 66: 'E', 160: 'S'}
@@ -327,12 +410,18 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2):
 
             callsign_map[ac_id] = (ac.get('callsign') or f'AC{ac_id}').strip()
 
-            # ETA to entry node in minutes
-            eta_min = _eta_to_entry_min(
-                ac['lat'], ac['lon'], ac.get('velocity_ms', 200.0),
-                _ENTRY_LATLON[direction]
-            )
-            arr_min = int(round(now_min + eta_min))
+            # ta1: use actual grid boundary crossing time if available,
+            # otherwise fall back to ETA estimate from snapshot position.
+            crossing_ts = ac.get('crossing_time')
+            if crossing_ts is not None:
+                crossing_min = (crossing_ts - midnight.timestamp()) / 60.0
+                arr_min = int(round(crossing_min))
+            else:
+                eta_min = _eta_to_entry_min(
+                    ac['lat'], ac['lon'], ac.get('velocity_ms', 200.0),
+                    _ENTRY_LATLON[direction]
+                )
+                arr_min = int(round(now_min + eta_min))
             ta1[node, ac_id] = arr_min
 
             # Wake turbulence category from real aircraft type
@@ -347,17 +436,27 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2):
             A_used.append(ac_id)
 
             # Edge travel time u[ac_id, path_length, step]:
-            # 1 min per edge for typical speed; scale by actual speed vs 250 kt reference
-            spd_kts = ac.get('velocity_ms', 128.6) / 0.5144
-            spd_kts = max(150.0, min(350.0, spd_kts))
-            ref_kts = 250.0
-            edge_nm = _grid_spacing_nm
-            edge_min_real = (edge_nm / spd_kts) * 60.0
-            # round to nearest integer minute, min 1
-            edge_min = max(1, round(edge_min_real))
-            for pl in range(5, 16):
-                for step in range(1, 16):
-                    u[ac_id, pl, step] = edge_min
+            # If CDO-derived u_override provided, use per-path times; else use speed-based constant.
+            if u_override and ac_id in u_override:
+                cdo_u = u_override[ac_id]  # dict: path_idx -> [edge_times_min]
+                for pl in range(5, 16):
+                    for step in range(1, 16):
+                        u[ac_id, pl, step] = 1  # default fallback
+                # Map all_paths index to Gurobi (path_length, step) keys
+                for path_idx, edge_times in cdo_u.items():
+                    if path_idx < len(all_paths):
+                        pl = len(all_paths[path_idx]) - 1
+                        for step_idx, et in enumerate(edge_times, start=1):
+                            u[ac_id, pl, step_idx] = max(1, int(round(et)))
+            else:
+                spd_kts = ac.get('velocity_ms', 128.6) / 0.5144
+                spd_kts = max(150.0, min(350.0, spd_kts))
+                edge_nm = _grid_spacing_nm
+                edge_min_real = (edge_nm / spd_kts) * 60.0
+                edge_min = max(1, round(edge_min_real))
+                for pl in range(5, 16):
+                    for step in range(1, 16):
+                        u[ac_id, pl, step] = edge_min
 
     if not A_used:
         stack.stack('ECHO TMAOPT: No aircraft assigned to entry nodes.')
@@ -373,9 +472,9 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2):
     T_start    = min(all_arr) - 5
     T_end      = T_start + 70
 
-    # TimeLimit scales with epsilon and aircraft count
+    # TimeLimit: use override from dialog if provided, else scale with epsilon + aircraft count
     n_ac = len(A_used)
-    time_limit = min(60 + epsilon * 60 + n_ac * 5, 600)
+    time_limit = int(time_limit_override) if time_limit_override else min(60 + epsilon * 60 + n_ac * 5, 600)
 
     # ── Trajectory lookup tables (exact replication of run_scenario.py) ──
     def _find_trajectories(profile):
@@ -773,7 +872,7 @@ def _parse_dtstr(dtstr):
 
 
 # ── Trino historical fetch ────────────────────────────────────────────────────
-def _fetch_historical(begin_ts, end_ts):
+def _fetch_historical(begin_ts, end_ts, fetch_radius_nm=50.0):
     """Fetch aircraft tracks via pyopensky Trino for a time window in the past.
     Returns (records, raw_tracks):
       records    — list of dicts (one per aircraft, snapshot at midpoint of window)
@@ -790,8 +889,8 @@ def _fetch_historical(begin_ts, end_ts):
         stack.stack('ECHO TMAOPT: Cannot import OpenSkyFetcher.')
         return [], []
 
-    lat_margin = _FETCH_RADIUS_NM / 60.0
-    lon_margin = _FETCH_RADIUS_NM / (60.0 * math.cos(math.radians(_ESSA[0])))
+    lat_margin = fetch_radius_nm / 60.0
+    lon_margin = fetch_radius_nm / (60.0 * math.cos(math.radians(_ESSA[0])))
     lamin = _ESSA[0] - lat_margin
     lamax = _ESSA[0] + lat_margin
     lomin = _ESSA[1] - lon_margin
@@ -810,26 +909,31 @@ def _fetch_historical(begin_ts, end_ts):
         wps = [wp for wp in track.waypoints if not wp.on_ground and wp.baro_alt_m and wp.baro_alt_m > 300]
         if not wps:
             continue
-        # Use the first waypoint inside the TMA as the representative snapshot.
-        # This gives the correct entry position rather than the midpoint-in-time
-        # which can be far away for aircraft that enter the TMA late in the window.
-        wp = next((w for w in wps if _point_in_tma(w.lat, w.lon)), None)
-        if wp is None:
-            # No point inside TMA — use closest to TMA boundary (min dist to any entry node)
-            wp = min(wps, key=lambda w: min(
-                _haversine_nm((w.lat, w.lon), ep) for ep in _ENTRY_LATLON.values()
-            ))
+        # Use the last waypoint OUTSIDE the grid bounding box as the snapshot.
+        # The grid defines the actual optimisation domain — aircraft that have already
+        # crossed into the grid have a known, precise entry time; those still outside
+        # give a clean ETA and unambiguous entry node assignment.
+        # Fallback: entire track already inside the grid → use earliest waypoint.
+        outside_wps = [w for w in wps if not _point_in_grid(w.lat, w.lon)]
+        if outside_wps:
+            wp = outside_wps[-1]   # last outside point = closest to grid boundary
+        else:
+            wp = wps[0]            # all inside — use earliest available
+
+        crossing_ts = _grid_crossing_time(wps)
+
         records.append({
-            'icao24':    track.icao24,
-            'callsign':  track.callsign,
-            'lat':       wp.lat,
-            'lon':       wp.lon,
-            'baro_alt':  wp.baro_alt_m or 0.0,
-            'on_ground': False,
-            'velocity':  wp.velocity_ms or 200.0,
-            'heading':   wp.true_track or 0.0,
-            'vertrate':  wp.vertical_rate_ms or 0.0,
-            'time':      wp.time,
+            'icao24':        track.icao24,
+            'callsign':      track.callsign,
+            'lat':           wp.lat,
+            'lon':           wp.lon,
+            'baro_alt':      wp.baro_alt_m or 0.0,
+            'on_ground':     False,
+            'velocity':      wp.velocity_ms or 200.0,
+            'heading':       wp.true_track or 0.0,
+            'vertrate':      wp.vertical_rate_ms or 0.0,
+            'time':          wp.time,
+            'crossing_time': crossing_ts,   # exact grid boundary crossing Unix timestamp
         })
     return records, tracks
 
@@ -863,7 +967,9 @@ def _save_historical_csv(out_dir, tracks, timestamp_str):
 
 
 # ── Main thread ───────────────────────────────────────────────────────────────
-def _run_tmaopt(dtstr='', duration=60):
+def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
+                max_ac_per_entry=5, max_eps=3, time_limit_per_eps=120,
+                s1=2, s2=3, fetch_radius=50, cdo_params=None):
     now_unix = time.time()
 
     # Determine begin/end timestamps
@@ -890,7 +996,8 @@ def _run_tmaopt(dtstr='', duration=60):
     # 1. Fetch aircraft via Trino
     track_waypoints = {}
     stack.stack(f'ECHO TMAOPT: Fetching {duration} min window ending at {datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M")} UTC via Trino ...')
-    raw_ac, raw_tracks = _fetch_historical(begin_ts, end_ts)
+    stack.stack(f'ECHO TMAOPT: Params — entries={entries} max_ac={max_ac} max_ac/entry={max_ac_per_entry} max_eps={max_eps} TL={time_limit_per_eps}s s1={s1} s2={s2} radius={fetch_radius}nm')
+    raw_ac, raw_tracks = _fetch_historical(begin_ts, end_ts, fetch_radius_nm=float(fetch_radius))
     if raw_tracks:
         _save_historical_csv(out_dir, raw_tracks, ts)
         for t in raw_tracks:
@@ -944,10 +1051,13 @@ def _run_tmaopt(dtstr='', duration=60):
         stack.stack('ECHO TMAOPT: No aircraft found crossing TMA boundary.')
         return
 
-    # 3. Assign to closest entry node; cap per entry
-    aircraft_by_entry = {'N': [], 'E': [], 'S': [], 'W': []}
+    # 3. Assign to closest entry node; filter inactive entries; cap per entry and total
+    active_entries = [d for d in ('N', 'E', 'S', 'W') if d in entries]
+    aircraft_by_entry = {d: [] for d in active_entries}
     for ac in arriving:
         direction, dist_ep = _assign_entry(ac['lat'], ac['lon'])
+        if direction not in active_entries:
+            continue
         aircraft_by_entry[direction].append({
             'callsign':    (ac['callsign'] or ac['icao24']).strip(),
             'icao24':      ac['icao24'],
@@ -960,14 +1070,38 @@ def _run_tmaopt(dtstr='', duration=60):
             'dist_to_entry_nm': dist_ep,
         })
 
-    # Sort each entry by distance (closest first) and cap
+    # Sort each entry by distance (closest first), cap per entry, then cap total
     for d in aircraft_by_entry:
         aircraft_by_entry[d].sort(key=lambda a: a['dist_to_entry_nm'])
-        aircraft_by_entry[d] = aircraft_by_entry[d][:_MAX_AC_PER_ENTRY]
+        aircraft_by_entry[d] = aircraft_by_entry[d][:max_ac_per_entry]
+
+    # Enforce global max_ac: drop furthest aircraft across all entries until within budget
+    all_ac_flat = [(d, a) for d in active_entries for a in aircraft_by_entry[d]]
+    if len(all_ac_flat) > max_ac:
+        all_ac_flat.sort(key=lambda x: x[1]['dist_to_entry_nm'])
+        all_ac_flat = all_ac_flat[:max_ac]
+        aircraft_by_entry = {d: [] for d in active_entries}
+        for d, a in all_ac_flat:
+            aircraft_by_entry[d].append(a)
+
+    _ref_midnight = datetime.fromtimestamp(ref_unix, tz=timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    _now_min = (ref_unix - _ref_midnight.timestamp()) / 60.0
 
     for d, acs in aircraft_by_entry.items():
         if acs:
-            stack.stack(f'ECHO TMAOPT:   {d} (node {_ENTRY_NODES[d]}): {len(acs)} ac — {", ".join(a["callsign"] for a in acs[:5])}')
+            ac_labels = []
+            for a in acs[:5]:
+                ct = a.get('crossing_time')
+                if ct is not None:
+                    ta1_min = int(round((ct - _ref_midnight.timestamp()) / 60.0))
+                else:
+                    eta = _eta_to_entry_min(a['lat'], a['lon'], a['velocity_ms'], _ENTRY_LATLON[d])
+                    ta1_min = int(round(_now_min + eta))
+                hh = (ta1_min // 60) % 24
+                mm = ta1_min % 60
+                ac_labels.append(f'{a["callsign"]}@{hh:02d}:{mm:02d}')
+            stack.stack(f'ECHO TMAOPT:   {d} (node {_ENTRY_NODES[d]}): {len(acs)} ac — {", ".join(ac_labels)}')
 
     # Save selected callsigns for traces plugin
     all_selected = {a['callsign'].upper() for acs in aircraft_by_entry.values() for a in acs}
@@ -985,43 +1119,98 @@ def _run_tmaopt(dtstr='', duration=60):
             for ac in acs:
                 w.writerow({**ac, 'entry': d, 'node': _ENTRY_NODES[d]})
 
-    # 5. Run optimisation — adaptive epsilon (0 → 2 → 3 → 4), matching run_scenario.py strategy
+    # 5. Run optimisation — adaptive epsilon up to max_eps
     stack.stack('ECHO TMAOPT: Running Gurobi optimisation ...')
     n_ac = sum(len(v) for v in aircraft_by_entry.values())
-    # Epsilon sequence: start tight, widen until feasible
-    eps_sequence = [0, 2, 3, 4]
+    # Build epsilon sequence: always start at 0, then 2, then every integer up to max_eps
+    _base = [0, 2]
+    eps_sequence = sorted(set(_base + list(range(3, max_eps + 1))))
+    eps_sequence = [e for e in eps_sequence if e <= max_eps]
+    from bluesky.plugins.cdo_gen import _run_cdoprecompute_inline, _run_cdogenopt_inline
+
+    # ── Phase 1: CDO precompute — all aircraft × all grid paths ─────────────
+    stack.stack(f'ECHO TMAOPT: Phase 1 — CDO precompute ({n_ac} aircraft × all grid paths) ...')
+    base_result = {
+        'all_paths':         [],   # filled below after we grab it from _run_optimisation
+        'cdo_params':        cdo_params or {},
+        'aircraft_by_entry': aircraft_by_entry,
+        'ref_unix':          ref_unix,
+    }
+    # We need all_paths before CDO precompute; generate them via a quick
+    # helper that returns the path list without solving the MIP.
+    all_paths = _get_all_paths()
+    base_result['all_paths'] = all_paths
+
+    t_precompute_start = time.time()
+    u_cdo = {}
+    try:
+        u_cdo, _fuel_cdo = _run_cdoprecompute_inline(base_result)
+    except Exception as _e:
+        stack.stack(f'ECHO TMAOPT: CDO precompute error: {_e} — falling back to speed-based u.')
+    t_precompute = time.time() - t_precompute_start
+    stack.stack(f'ECHO TMAOPT: CDO precompute done in {t_precompute:.1f}s '
+                f'({len(u_cdo)} aircraft covered).')
+
+    # Translate 0-based ac_idx → 1-based ac_id used by _run_optimisation
+    u_override = {ac_idx + 1: paths for ac_idx, paths in u_cdo.items()} if u_cdo else None
+
+    # ── Phase 2: Gurobi with CDO-derived u ──────────────────────────────────
+    stack.stack(f'ECHO TMAOPT: Phase 2 — Gurobi optimisation with CDO travel times ...')
     result = None
+    t_opt_start = time.time()
     for eps in eps_sequence:
         stack.stack(f'ECHO TMAOPT: Trying epsilon={eps} ({n_ac} aircraft) ...')
-        result = _run_optimisation(aircraft_by_entry, ref_unix, epsilon=eps)
+        t_eps_start = time.time()
+        result = _run_optimisation(aircraft_by_entry, ref_unix, epsilon=eps,
+                                   time_limit_override=time_limit_per_eps,
+                                   s1=s1, s2=s2,
+                                   u_override=u_override)
+        t_eps = time.time() - t_eps_start
         if result is None:
             stack.stack('ECHO TMAOPT: Optimisation failed (model error).')
             return
         if result['feasible']:
+            stack.stack(f'ECHO TMAOPT: epsilon={eps} solved in {t_eps:.1f}s')
             break
-        stack.stack(f'ECHO TMAOPT: epsilon={eps} → status={result["status"]}, trying next ...')
+        stack.stack(f'ECHO TMAOPT: epsilon={eps} → status={result["status"]}  {t_eps:.1f}s, trying next ...')
+    t_opt_total = time.time() - t_opt_start
 
     if result is None:
         stack.stack('ECHO TMAOPT: Optimisation failed.')
         return
 
-    # 6. Save result pkl
+    result['cdo_params']        = cdo_params or {}
+    result['aircraft_by_entry'] = aircraft_by_entry
+    result['ref_unix']          = ref_unix
+
+    # Save result pkl
     with open(out_dir / 'result.pkl', 'wb') as f:
         pickle.dump(result, f)
 
-    # 7. Save .scn
+    # Save horizontal-tree .scn
     scn_path = _save_scn(out_dir, result, ts, aircraft_by_entry)
 
-    # 8. Report
     eps_used = result.get('epsilon', '?')
     if result['feasible']:
         stack.stack(
             f'ECHO TMAOPT: FEASIBLE  obj={result["objective"]:.2f}  '
             f'ac={result["n_aircraft"]}  eps={eps_used}  '
-            f'merges={len(result["merge_points"])}  links={len(result["tree_links"])}'
+            f'merges={len(result["merge_points"])}  links={len(result["tree_links"])}  '
+            f'time={t_precompute + t_opt_total:.1f}s'
         )
     else:
-        stack.stack(f'ECHO TMAOPT: INFEASIBLE after all epsilon values  ac={result["n_aircraft"]}')
+        stack.stack(
+            f'ECHO TMAOPT: INFEASIBLE after all epsilon values  '
+            f'ac={result["n_aircraft"]}  time={t_precompute + t_opt_total:.1f}s'
+        )
 
     stack.stack(f'ECHO TMAOPT: Saved → {out_dir.relative_to(_REPO_ROOT)}')
     stack.stack(f'ECHO TMAOPT: SCN: {scn_path.name}')
+
+    # ── Phase 3: CDO on optimal routes → final CDO CSV + SCN ─────────────────
+    if result['feasible']:
+        stack.stack('ECHO TMAOPT: Phase 3 — generating CDO profiles on optimal routes ...')
+        try:
+            _run_cdogenopt_inline(result, out_dir)
+        except Exception as _cdo_err:
+            stack.stack(f'ECHO TMAOPT: CDOGENOPT error: {_cdo_err}')

@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QApplication as app, QWidget, QMainWindow, \
     QSplashScreen, QTreeWidgetItem, QPushButton, QFileDialog, QDialog, \
     QTreeWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QDialogButtonBox, \
     QMenu, QLabel, QDateEdit, QTimeEdit, QSpinBox, QDoubleSpinBox, QComboBox, \
-    QGroupBox
+    QGroupBox, QCheckBox
 from PyQt6.QtCore import Qt, pyqtSlot, QTimer, QItemSelectionModel, QSize, \
     QEvent, pyqtProperty, QDir, QDate, QTime
 from PyQt6.QtGui import QPixmap, QIcon
@@ -264,21 +264,23 @@ class OpenSkyDialog(QDialog):
 
 
 class TMAOptDialog(QDialog):
-    """Dialog for running TMA optimization on historical or live OpenSky traffic."""
+    """Dialog for running TMA optimization on historical OpenSky traffic."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('TMA Optimization')
         self.setModal(True)
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(400)
 
         root = QVBoxLayout(self)
+        root.setSpacing(8)
 
+        # ── Time window ──────────────────────────────────────────────
         dt_group = QGroupBox('Traffic Time Window (UTC)')
-        dt_form = QFormLayout(dt_group)
+        dt_form  = QFormLayout(dt_group)
 
         from PyQt6.QtCore import QDateTime
-        now_qt = QDateTime.currentDateTimeUtc()
+        now_qt     = QDateTime.currentDateTimeUtc()
         default_dt = now_qt.addSecs(-1800)
 
         self.date_edit = QDateEdit(default_dt.date())
@@ -296,9 +298,137 @@ class TMAOptDialog(QDialog):
         self.duration_spin.setSuffix(' min')
         dt_form.addRow('Duration:', self.duration_spin)
 
-
         root.addWidget(dt_group)
 
+        # ── Entry points ─────────────────────────────────────────────
+        entry_group = QGroupBox('Active Entry Points')
+        entry_layout = QHBoxLayout(entry_group)
+        self.cb_N = QCheckBox('N'); self.cb_N.setChecked(True)
+        self.cb_E = QCheckBox('E'); self.cb_E.setChecked(True)
+        self.cb_S = QCheckBox('S'); self.cb_S.setChecked(True)
+        self.cb_W = QCheckBox('W'); self.cb_W.setChecked(True)
+        for cb in (self.cb_N, self.cb_E, self.cb_S, self.cb_W):
+            entry_layout.addWidget(cb)
+        root.addWidget(entry_group)
+
+        # ── Optimisation parameters ───────────────────────────────────
+        opt_group = QGroupBox('Optimisation Parameters')
+        opt_form  = QFormLayout(opt_group)
+
+        self.max_ac_spin = QSpinBox()
+        self.max_ac_spin.setRange(2, 40)
+        self.max_ac_spin.setValue(15)
+        self.max_ac_spin.setToolTip('Total aircraft sent to Gurobi (spread evenly across active entries)')
+        opt_form.addRow('Max aircraft:', self.max_ac_spin)
+
+        self.max_ac_per_entry_spin = QSpinBox()
+        self.max_ac_per_entry_spin.setRange(1, 10)
+        self.max_ac_per_entry_spin.setValue(5)
+        self.max_ac_per_entry_spin.setToolTip('Maximum aircraft per entry node')
+        opt_form.addRow('Max ac / entry:', self.max_ac_per_entry_spin)
+
+        self.max_eps_spin = QSpinBox()
+        self.max_eps_spin.setRange(0, 10)
+        self.max_eps_spin.setValue(3)
+        self.max_eps_spin.setSuffix(' min')
+        self.max_eps_spin.setToolTip('Maximum epsilon (±min flexibility around estimated entry time). Sequence: 0 → 2 → 3 → … → max')
+        opt_form.addRow('Max epsilon:', self.max_eps_spin)
+
+        self.time_limit_spin = QSpinBox()
+        self.time_limit_spin.setRange(30, 600)
+        self.time_limit_spin.setValue(120)
+        self.time_limit_spin.setSuffix(' s')
+        self.time_limit_spin.setToolTip('Gurobi time limit per epsilon attempt')
+        opt_form.addRow('Time limit / attempt:', self.time_limit_spin)
+
+        self.s1_spin = QSpinBox()
+        self.s1_spin.setRange(1, 10)
+        self.s1_spin.setValue(2)
+        self.s1_spin.setSuffix(' min')
+        self.s1_spin.setToolTip('Minimum separation Heavy–Heavy at merge/runway')
+        opt_form.addRow('Sep Heavy–Heavy (s1):', self.s1_spin)
+
+        self.s2_spin = QSpinBox()
+        self.s2_spin.setRange(1, 10)
+        self.s2_spin.setValue(3)
+        self.s2_spin.setSuffix(' min')
+        self.s2_spin.setToolTip('Minimum separation Heavy–Medium or Medium–Medium')
+        opt_form.addRow('Sep Heavy–Med (s2):', self.s2_spin)
+
+        self.fetch_radius_spin = QSpinBox()
+        self.fetch_radius_spin.setRange(10, 400)
+        self.fetch_radius_spin.setValue(50)
+        self.fetch_radius_spin.setSuffix(' nm')
+        self.fetch_radius_spin.setToolTip('Radius around ESSA for Trino data fetch')
+        opt_form.addRow('Fetch radius:', self.fetch_radius_spin)
+
+        root.addWidget(opt_group)
+
+        # ── CDO Parameters ────────────────────────────────────────────
+        cdo_group = QGroupBox('CDO Parameters')
+        cdo_form  = QFormLayout(cdo_group)
+
+        self.cdo_fap_alt_spin = QSpinBox()
+        self.cdo_fap_alt_spin.setRange(500, 5000)
+        self.cdo_fap_alt_spin.setValue(2000)
+        self.cdo_fap_alt_spin.setSuffix(' ft')
+        self.cdo_fap_alt_spin.setToolTip('Final Approach Point altitude — CDO ends here')
+        cdo_form.addRow('FAP altitude:', self.cdo_fap_alt_spin)
+
+        self.cdo_ias_start_spin = QSpinBox()
+        self.cdo_ias_start_spin.setRange(100, 350)
+        self.cdo_ias_start_spin.setValue(200)
+        self.cdo_ias_start_spin.setSuffix(' kt')
+        self.cdo_ias_start_spin.setToolTip('CAS at FAP (CDO start speed)')
+        cdo_form.addRow('IAS at FAP:', self.cdo_ias_start_spin)
+
+        self.cdo_ias_restrict_spin = QSpinBox()
+        self.cdo_ias_restrict_spin.setRange(150, 350)
+        self.cdo_ias_restrict_spin.setValue(220)
+        self.cdo_ias_restrict_spin.setSuffix(' kt')
+        self.cdo_ias_restrict_spin.setToolTip('Max CAS on approach arcs (IAS restriction)')
+        cdo_form.addRow('IAS restriction:', self.cdo_ias_restrict_spin)
+
+        self.cdo_mach_spin = QDoubleSpinBox()
+        self.cdo_mach_spin.setRange(0.60, 0.95)
+        self.cdo_mach_spin.setValue(0.84)
+        self.cdo_mach_spin.setSingleStep(0.01)
+        self.cdo_mach_spin.setDecimals(2)
+        self.cdo_mach_spin.setToolTip('Mach number in upper descent (above Mach/CAS crossover)')
+        cdo_form.addRow('M descent:', self.cdo_mach_spin)
+
+        self.cdo_mlw_spin = QDoubleSpinBox()
+        self.cdo_mlw_spin.setRange(0.5, 1.0)
+        self.cdo_mlw_spin.setValue(0.9)
+        self.cdo_mlw_spin.setSingleStep(0.05)
+        self.cdo_mlw_spin.setDecimals(2)
+        self.cdo_mlw_spin.setToolTip('Aircraft mass as fraction of MLW (e.g. 0.9 = 90% MLW)')
+        cdo_form.addRow('Mass (×MLW):', self.cdo_mlw_spin)
+
+        self.cdo_kt_per_sec_spin = QDoubleSpinBox()
+        self.cdo_kt_per_sec_spin.setRange(0.1, 5.0)
+        self.cdo_kt_per_sec_spin.setValue(1.0)
+        self.cdo_kt_per_sec_spin.setSingleStep(0.1)
+        self.cdo_kt_per_sec_spin.setDecimals(1)
+        self.cdo_kt_per_sec_spin.setToolTip('Speed deceleration rate between altitude bands (kt/s)')
+        cdo_form.addRow('Decel rate:', self.cdo_kt_per_sec_spin)
+
+        self.cdo_wind_cb = QCheckBox('Use ERA5 wind/temperature')
+        self.cdo_wind_cb.setChecked(True)
+        self.cdo_wind_cb.setToolTip('Use ERA5 reanalysis wind and temperature in CDO physics')
+        cdo_form.addRow('', self.cdo_wind_cb)
+
+        self.cdo_c_v_min_spin = QDoubleSpinBox()
+        self.cdo_c_v_min_spin.setRange(1.0, 1.5)
+        self.cdo_c_v_min_spin.setValue(1.23)
+        self.cdo_c_v_min_spin.setSingleStep(0.01)
+        self.cdo_c_v_min_spin.setDecimals(2)
+        self.cdo_c_v_min_spin.setToolTip('BADA minimum speed coefficient (fraction of stall speed)')
+        cdo_form.addRow('C_v_min:', self.cdo_c_v_min_spin)
+
+        root.addWidget(cdo_group)
+
+        # ── Buttons ───────────────────────────────────────────────────
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -311,7 +441,31 @@ class TMAOptDialog(QDialog):
         time_str = self.time_edit.time().toString('HH:mm')
         dt_str   = f'{date_str}T{time_str}'
         duration = self.duration_spin.value()
-        stack.stack(f'TMAOPT {dt_str} {duration}')
+        entries  = ''.join(
+            d for d, cb in (('N', self.cb_N), ('E', self.cb_E),
+                            ('S', self.cb_S), ('W', self.cb_W)) if cb.isChecked()
+        ) or 'NESW'
+        max_ac           = self.max_ac_spin.value()
+        max_ac_per_entry = self.max_ac_per_entry_spin.value()
+        max_eps          = self.max_eps_spin.value()
+        time_limit       = self.time_limit_spin.value()
+        s1               = self.s1_spin.value()
+        s2               = self.s2_spin.value()
+        fetch_radius     = self.fetch_radius_spin.value()
+        cdo_fap_alt      = self.cdo_fap_alt_spin.value()
+        cdo_ias_start    = self.cdo_ias_start_spin.value()
+        cdo_ias_restrict = self.cdo_ias_restrict_spin.value()
+        cdo_mach         = self.cdo_mach_spin.value()
+        cdo_mlw          = self.cdo_mlw_spin.value()
+        cdo_kt_per_sec   = self.cdo_kt_per_sec_spin.value()
+        cdo_wind         = int(self.cdo_wind_cb.isChecked())
+        cdo_c_v_min      = self.cdo_c_v_min_spin.value()
+        stack.stack(
+            f'TMAOPT {dt_str} {duration} {entries} {max_ac} {max_ac_per_entry} '
+            f'{max_eps} {time_limit} {s1} {s2} {fetch_radius} '
+            f'{cdo_fap_alt} {cdo_ias_start} {cdo_ias_restrict} {cdo_mach} '
+            f'{cdo_mlw} {cdo_kt_per_sec} {cdo_wind} {cdo_c_v_min}'
+        )
         self.accept()
 
 

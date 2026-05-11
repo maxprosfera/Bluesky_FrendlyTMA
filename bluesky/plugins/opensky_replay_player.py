@@ -116,10 +116,12 @@ def update():
         lon  = _lerp_lon(wp_a['lon'], wp_b['lon']  if wp_b else wp_a['lon'],   frac)
         alt  = _lerp(wp_a['alt_m'], wp_b['alt_m'] if wp_b else wp_a['alt_m'], frac)  # metres
         hdg  = _lerp_hdg(wp_a['hdg'], wp_b['hdg'] if wp_b else wp_a['hdg'],   frac)
-        gs   = _lerp(wp_a['gs_ms'], wp_b['gs_ms'] if wp_b else wp_a['gs_ms'], frac)  # m/s
-        vs   = _lerp(wp_a['vs_ms'], wp_b['vs_ms'] if wp_b else wp_a['vs_ms'], frac)  # m/s
-
-        cas = _gs_to_cas(gs, alt)  # m/s
+        gs   = _lerp(wp_a['gs_ms'],  wp_b['gs_ms']  if wp_b else wp_a['gs_ms'],  frac)  # m/s GS
+        vs   = _lerp(wp_a['vs_ms'],  wp_b['vs_ms']  if wp_b else wp_a['vs_ms'],  frac)  # m/s
+        # Use pre-computed CAS from CDO output if available, else derive from GS
+        cas_a = wp_a.get('cas_ms') or _gs_to_cas(wp_a['gs_ms'], wp_a['alt_m'])
+        cas_b = (wp_b.get('cas_ms') or _gs_to_cas(wp_b['gs_ms'], wp_b['alt_m'])) if wp_b else cas_a
+        cas  = _lerp(cas_a, cas_b, frac)
 
         idx = bs.traf.id2idx(cs)
 
@@ -130,15 +132,15 @@ def update():
             _managed.add(cs)
         else:
             # Direct array injection — bypasses autopilot entirely
+            from bluesky.tools.aero import vcasormach2tas
+            tas = vcasormach2tas(cas, alt)
             bs.traf.lat[idx] = lat
             bs.traf.lon[idx] = lon
             bs.traf.alt[idx] = alt       # metres
             bs.traf.hdg[idx] = hdg
             bs.traf.trk[idx] = hdg
             bs.traf.vs[idx]  = vs        # m/s
-            # TAS from CAS
-            from bluesky.tools.aero import vcasormach2tas
-            bs.traf.tas[idx] = vcasormach2tas(cas, alt)
+            bs.traf.tas[idx] = tas
             bs.traf.gs[idx]  = gs        # m/s
 
     for cs in to_delete:
@@ -223,6 +225,7 @@ def _load_csv(path: Path) -> dict:
                     alt_m = float(row['baro_alt_m']) if row['baro_alt_m'] else None
                     if alt_m is None or alt_m <= 0:
                         continue
+                    cas_raw = row.get('cas_ms', '')
                     wp = {
                         't':      int(row['time']),
                         'lat':    float(row['lat']),
@@ -231,6 +234,7 @@ def _load_csv(path: Path) -> dict:
                         'hdg':    float(row['true_track'])    if row['true_track']      else 0.0,
                         'gs_ms':  float(row['velocity_ms'])   if row['velocity_ms']     else 0.0,
                         'vs_ms':  float(row['vertical_rate_ms']) if row['vertical_rate_ms'] else 0.0,
+                        'cas_ms': float(cas_raw) if cas_raw else None,
                         'icao24': row['icao24'].strip().lower(),
                     }
                     if cs not in tracks:
