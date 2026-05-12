@@ -441,19 +441,20 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
                 cdo_u = u_override[ac_id]  # dict: path_idx -> [edge_times_min]
                 for pl in range(5, 16):
                     for step in range(1, 16):
-                        u[ac_id, pl, step] = 1  # default fallback
+                        u[ac_id, pl, step] = s1  # default fallback — minimum = s1
                 # Map all_paths index to Gurobi (path_length, step) keys
                 for path_idx, edge_times in cdo_u.items():
                     if path_idx < len(all_paths):
                         pl = len(all_paths[path_idx]) - 1
                         for step_idx, et in enumerate(edge_times, start=1):
-                            u[ac_id, pl, step_idx] = max(1, int(round(et)))
+                            # Enforce minimum edge time >= s1 so mid-edge separation is guaranteed
+                            u[ac_id, pl, step_idx] = max(s1, int(round(et)))
             else:
                 spd_kts = ac.get('velocity_ms', 128.6) / 0.5144
                 spd_kts = max(150.0, min(350.0, spd_kts))
                 edge_nm = _grid_spacing_nm
                 edge_min_real = (edge_nm / spd_kts) * 60.0
-                edge_min = max(1, round(edge_min_real))
+                edge_min = max(s1, round(edge_min_real))  # minimum = s1 to guarantee mid-edge separation
                 for pl in range(5, 16):
                     for step in range(1, 16):
                         u[ac_id, pl, step] = edge_min

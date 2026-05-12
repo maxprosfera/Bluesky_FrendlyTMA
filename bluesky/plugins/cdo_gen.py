@@ -433,16 +433,14 @@ def _find_latest_result_pkl(pkl_arg: str):
     return None
 
 
-def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0, entry_alt_m=None):
+def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0,
+                          entry_alt_m=None, node_unix_times=None):
     """Build a list of row-dicts along a grid node path.
 
-    Each row represents a waypoint at the node position. Timestamps are
-    assigned by propagating time forward using the given speed between nodes.
-    Used as the 'rows' argument to _cdo_for_aircraft.
-
-    entry_alt_m: actual aircraft altitude at TMA entry (from OpenSky). Used as
-    the altitude of the first (entry) node so _cdo_for_aircraft knows how high
-    to integrate backward. If None, defaults to 6096 m (FL200).
+    node_unix_times: optional list of per-node Unix timestamps (same length as node_list).
+    When provided, uses Gurobi-schedule timestamps so the CDO replay respects the
+    exact temporal separation the optimizer enforced. When None, timestamps are derived
+    from speed-based propagation.
     """
     import sys as _sys
     _REPO_ROOT_STR = str(_REPO_ROOT)
@@ -460,12 +458,16 @@ def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0, entry_alt_m=
         lat, lon = _GRID_COORDS[node_id]
         if i > 0:
             prev_lat, prev_lon = _GRID_COORDS[node_list[i - 1]]
-            dist_nm = _haversine_nm((prev_lat, prev_lon), (lat, lon))
-            dt      = dist_nm * 1852.0 / max(speed_ms, 1.0)
-            t      += dt
-            trk     = _bearing((prev_lat, prev_lon), (lat, lon))
+            trk = _bearing((prev_lat, prev_lon), (lat, lon))
+            if node_unix_times is not None and i < len(node_unix_times):
+                t = float(node_unix_times[i])
+            else:
+                dist_nm = _haversine_nm((prev_lat, prev_lon), (lat, lon))
+                t      += dist_nm * 1852.0 / max(speed_ms, 1.0)
         else:
             trk = 0.0
+            if node_unix_times is not None and len(node_unix_times) > 0:
+                t = float(node_unix_times[0])
         # Linearly interpolate altitude from entry (alt_entry) down to FAP (609.6 m)
         # so _cdo_for_aircraft sees a realistic descending track, not a flat 3000 m sheet.
         frac     = i / max(n - 1, 1)
@@ -1078,11 +1080,24 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
         cs       = callsign_map.get(ac_id, ac.get('callsign', f'AC{ac_id}'))
         icao24   = ac.get('icao24', '')
         speed_ms = ac.get('velocity_ms', 200.0)
-        entry_unix = midnight.timestamp() + entry_min * 60.0
 
+        # Compute per-node arrival times from Gurobi schedule (entry_min + cumulative u).
+        # This preserves the exact separation the optimizer enforced, independent of
+        # CDO physics travel speed which can differ from u.
+        u_table  = result.get('u', {})
+        pl       = len(node_list) - 1
+        node_unix_times = []
+        t_min = entry_min
+        for step_idx in range(pl + 1):
+            node_unix_times.append(midnight.timestamp() + t_min * 60.0)
+            if step_idx < pl:
+                t_min += u_table.get((ac_id, pl, step_idx + 1), 2)
+
+        entry_unix  = node_unix_times[0]
         entry_alt_m = ac.get('alt_m') or ac.get('baro_alt_m')
         rows = _grid_rows_from_nodes(node_list, entry_unix, speed_ms=speed_ms,
-                                     entry_alt_m=entry_alt_m)
+                                     entry_alt_m=entry_alt_m,
+                                     node_unix_times=node_unix_times)
         if not rows:
             errors.append(f'{cs}: empty path rows')
             continue
@@ -1173,7 +1188,7 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
     tree_links = result.get('tree_links', [])
     merge_pts  = result.get('merge_points', [])
 
-    from bluesky.plugins.tma_opt import _GRID_COORDS as _GC, _write_grid_to_scn
+    from bluesky.plugins.tma_opt import _GRID_COORDS as _GC, _write_grid
 
     with open(scn_path_out, 'w') as f:
         f.write(f'# CDO-Optimal Scenario — {stem}\n')
@@ -1186,7 +1201,7 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
         f.write('00:00:00.00> SWRAD APT 0\n')
         f.write('00:00:00.00> SWRAD SAT 0\n')
         f.write(f'00:00:00.00> POLY StockholmTMA {_STOCKHOLM_TMA_POLY}\n')
-        _write_grid_to_scn(f, result.get('LINKS', []))
+        _write_grid(f, result.get('LINKS', []), result.get('B', []), result.get('N_exit', 72))
         for (i, j) in tree_links:
             if i in _GC and j in _GC:
                 f.write(f'00:00:00.00> POLYLINE OPT_{i}_{j} '
