@@ -1033,7 +1033,127 @@ def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
         stack.stack('ECHO TMAOPT: No data received — aborting.')
         return
 
-    # 2. Filter arrivals
+    # 2+3. Filter arrivals and assign to entry nodes
+    aircraft_by_entry, n_arriving = _build_aircraft_by_entry(
+        raw_ac, track_waypoints, entries, max_ac, max_ac_per_entry, ref_unix)
+    stack.stack(f'ECHO TMAOPT: {n_arriving} aircraft crossed/inside TMA boundary.')
+
+    if not any(aircraft_by_entry.values()):
+        stack.stack('ECHO TMAOPT: No aircraft found crossing TMA boundary.')
+        return
+
+    # 4. Save aircraft CSV
+    with open(out_dir / 'aircraft.csv', 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=[
+            'callsign','icao24','entry','node','lat','lon',
+            'alt_m','velocity_ms','heading','vertrate','dist_to_entry_nm','crossing_time'
+        ])
+        w.writeheader()
+        for d, acs in aircraft_by_entry.items():
+            for ac in acs:
+                w.writerow({**ac, 'entry': d, 'node': _ENTRY_NODES[d]})
+
+    # 5. Run optimisation — adaptive epsilon up to max_eps
+    stack.stack('ECHO TMAOPT: Running Gurobi optimisation ...')
+    n_ac = sum(len(v) for v in aircraft_by_entry.values())
+    _base = [0, 2]
+    eps_sequence = sorted(set(_base + list(range(3, max_eps + 1))))
+    eps_sequence = [e for e in eps_sequence if e <= max_eps]
+    from bluesky.plugins.cdo_gen import _run_cdoprecompute_inline, _run_cdogenopt_inline
+
+    # ── Phase 1: CDO precompute — all aircraft × all grid paths ─────────────
+    stack.stack(f'ECHO TMAOPT: Phase 1 — CDO precompute ({n_ac} aircraft × all grid paths) ...')
+    base_result = {
+        'all_paths':         [],
+        'cdo_params':        cdo_params or {},
+        'aircraft_by_entry': aircraft_by_entry,
+        'ref_unix':          ref_unix,
+    }
+    all_paths = _get_all_paths()
+    base_result['all_paths'] = all_paths
+
+    t_precompute_start = time.time()
+    u_cdo = {}
+    try:
+        u_cdo, _fuel_cdo = _run_cdoprecompute_inline(base_result)
+    except Exception as _e:
+        stack.stack(f'ECHO TMAOPT: CDO precompute error: {_e} — falling back to speed-based u.')
+    t_precompute = time.time() - t_precompute_start
+    stack.stack(f'ECHO TMAOPT: CDO precompute done in {t_precompute:.1f}s '
+                f'({len(u_cdo)} aircraft covered).')
+
+    u_override = {ac_idx + 1: paths for ac_idx, paths in u_cdo.items()} if u_cdo else None
+
+    # ── Phase 2: Gurobi with CDO-derived u ──────────────────────────────────
+    stack.stack(f'ECHO TMAOPT: Phase 2 — Gurobi optimisation with CDO travel times ...')
+    result = None
+    t_opt_start = time.time()
+    for eps in eps_sequence:
+        stack.stack(f'ECHO TMAOPT: Trying epsilon={eps} ({n_ac} aircraft) ...')
+        t_eps_start = time.time()
+        result = _run_optimisation(aircraft_by_entry, ref_unix, epsilon=eps,
+                                   time_limit_override=time_limit_per_eps,
+                                   s1=s1, s2=s2,
+                                   u_override=u_override)
+        t_eps = time.time() - t_eps_start
+        if result is None:
+            stack.stack('ECHO TMAOPT: Optimisation failed (model error).')
+            return
+        if result['feasible']:
+            stack.stack(f'ECHO TMAOPT: epsilon={eps} solved in {t_eps:.1f}s')
+            break
+        stack.stack(f'ECHO TMAOPT: epsilon={eps} → status={result["status"]}  {t_eps:.1f}s, trying next ...')
+    t_opt_total = time.time() - t_opt_start
+
+    if result is None:
+        stack.stack('ECHO TMAOPT: Optimisation failed.')
+        return
+
+    result['cdo_params']        = cdo_params or {}
+    result['aircraft_by_entry'] = aircraft_by_entry
+    result['ref_unix']          = ref_unix
+
+    with open(out_dir / 'result.pkl', 'wb') as f:
+        pickle.dump(result, f)
+
+    scn_path = _save_scn(out_dir, result, ts, aircraft_by_entry)
+
+    eps_used = result.get('epsilon', '?')
+    if result['feasible']:
+        stack.stack(
+            f'ECHO TMAOPT: FEASIBLE  obj={result["objective"]:.2f}  '
+            f'ac={result["n_aircraft"]}  eps={eps_used}  '
+            f'merges={len(result["merge_points"])}  links={len(result["tree_links"])}  '
+            f'time={t_precompute + t_opt_total:.1f}s'
+        )
+    else:
+        stack.stack(
+            f'ECHO TMAOPT: INFEASIBLE after all epsilon values  '
+            f'ac={result["n_aircraft"]}  time={t_precompute + t_opt_total:.1f}s'
+        )
+
+    stack.stack(f'ECHO TMAOPT: Saved → {out_dir.relative_to(_REPO_ROOT)}')
+    stack.stack(f'ECHO TMAOPT: SCN: {scn_path.name}')
+
+    # ── Phase 3: CDO on optimal routes → final CDO CSV + SCN ─────────────────
+    if result['feasible']:
+        stack.stack('ECHO TMAOPT: Phase 3 — generating CDO profiles on optimal routes ...')
+        try:
+            _run_cdogenopt_inline(result, out_dir)
+        except Exception as _cdo_err:
+            stack.stack(f'ECHO TMAOPT: CDOGENOPT error: {_cdo_err}')
+
+
+def _build_aircraft_by_entry(raw_ac, track_waypoints, entries, max_ac,
+                             max_ac_per_entry, ref_unix):
+    """Filter arrivals from raw_ac and assign them to TMA entry nodes.
+
+    Returns (aircraft_by_entry, arriving_count) where aircraft_by_entry is a
+    dict keyed by direction ('N','E','S','W') and arriving_count is the number
+    of aircraft that passed the arrival filter before capping.
+    """
+    active_entries = [d for d in ('N', 'E', 'S', 'W') if d in entries]
+
     arriving = []
     seen = set()
     for ac in raw_ac:
@@ -1069,38 +1189,28 @@ def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
         seen.add(cs)
         arriving.append(ac)
 
-    stack.stack(f'ECHO TMAOPT: {len(arriving)} aircraft crossed/inside TMA boundary.')
-
-    if not arriving:
-        stack.stack('ECHO TMAOPT: No aircraft found crossing TMA boundary.')
-        return
-
-    # 3. Assign to closest entry node; filter inactive entries; cap per entry and total
-    active_entries = [d for d in ('N', 'E', 'S', 'W') if d in entries]
     aircraft_by_entry = {d: [] for d in active_entries}
     for ac in arriving:
         direction, dist_ep = _assign_entry(ac['lat'], ac['lon'])
         if direction not in active_entries:
             continue
         aircraft_by_entry[direction].append({
-            'callsign':    (ac['callsign'] or ac['icao24']).strip(),
-            'icao24':      ac['icao24'],
-            'lat':         ac['lat'],
-            'lon':         ac['lon'],
-            'alt_m':       ac['baro_alt'],
-            'velocity_ms': ac['velocity'],
-            'heading':     ac['heading'],
-            'vertrate':    ac['vertrate'],
+            'callsign':         (ac['callsign'] or ac['icao24']).strip(),
+            'icao24':           ac['icao24'],
+            'lat':              ac['lat'],
+            'lon':              ac['lon'],
+            'alt_m':            ac['baro_alt'],
+            'velocity_ms':      ac['velocity'],
+            'heading':          ac['heading'],
+            'vertrate':         ac['vertrate'],
             'dist_to_entry_nm': dist_ep,
             'crossing_time':    ac.get('crossing_time'),
         })
 
-    # Sort each entry by distance (closest first), cap per entry, then cap total
     for d in aircraft_by_entry:
         aircraft_by_entry[d].sort(key=lambda a: a['dist_to_entry_nm'])
         aircraft_by_entry[d] = aircraft_by_entry[d][:max_ac_per_entry]
 
-    # Enforce global max_ac: drop furthest aircraft across all entries until within budget
     all_ac_flat = [(d, a) for d in active_entries for a in aircraft_by_entry[d]]
     if len(all_ac_flat) > max_ac:
         all_ac_flat.sort(key=lambda x: x[1]['dist_to_entry_nm'])
@@ -1128,114 +1238,4 @@ def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
                 ac_labels.append(f'{a["callsign"]}@{hh:02d}:{mm:02d}')
             stack.stack(f'ECHO TMAOPT:   {d} (node {_ENTRY_NODES[d]}): {len(acs)} ac — {", ".join(ac_labels)}')
 
-    # Save selected callsigns for traces plugin
-    all_selected = {a['callsign'].upper() for acs in aircraft_by_entry.values() for a in acs}
-    with open(out_dir / 'selected.txt', 'w') as f:
-        f.write('\n'.join(sorted(all_selected)))
-
-    # 4. Save aircraft CSV
-    with open(out_dir / 'aircraft.csv', 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=[
-            'callsign','icao24','entry','node','lat','lon',
-            'alt_m','velocity_ms','heading','vertrate','dist_to_entry_nm','crossing_time'
-        ])
-        w.writeheader()
-        for d, acs in aircraft_by_entry.items():
-            for ac in acs:
-                w.writerow({**ac, 'entry': d, 'node': _ENTRY_NODES[d]})
-
-    # 5. Run optimisation — adaptive epsilon up to max_eps
-    stack.stack('ECHO TMAOPT: Running Gurobi optimisation ...')
-    n_ac = sum(len(v) for v in aircraft_by_entry.values())
-    # Build epsilon sequence: always start at 0, then 2, then every integer up to max_eps
-    _base = [0, 2]
-    eps_sequence = sorted(set(_base + list(range(3, max_eps + 1))))
-    eps_sequence = [e for e in eps_sequence if e <= max_eps]
-    from bluesky.plugins.cdo_gen import _run_cdoprecompute_inline, _run_cdogenopt_inline
-
-    # ── Phase 1: CDO precompute — all aircraft × all grid paths ─────────────
-    stack.stack(f'ECHO TMAOPT: Phase 1 — CDO precompute ({n_ac} aircraft × all grid paths) ...')
-    base_result = {
-        'all_paths':         [],   # filled below after we grab it from _run_optimisation
-        'cdo_params':        cdo_params or {},
-        'aircraft_by_entry': aircraft_by_entry,
-        'ref_unix':          ref_unix,
-    }
-    # We need all_paths before CDO precompute; generate them via a quick
-    # helper that returns the path list without solving the MIP.
-    all_paths = _get_all_paths()
-    base_result['all_paths'] = all_paths
-
-    t_precompute_start = time.time()
-    u_cdo = {}
-    try:
-        u_cdo, _fuel_cdo = _run_cdoprecompute_inline(base_result)
-    except Exception as _e:
-        stack.stack(f'ECHO TMAOPT: CDO precompute error: {_e} — falling back to speed-based u.')
-    t_precompute = time.time() - t_precompute_start
-    stack.stack(f'ECHO TMAOPT: CDO precompute done in {t_precompute:.1f}s '
-                f'({len(u_cdo)} aircraft covered).')
-
-    # Translate 0-based ac_idx → 1-based ac_id used by _run_optimisation
-    u_override = {ac_idx + 1: paths for ac_idx, paths in u_cdo.items()} if u_cdo else None
-
-    # ── Phase 2: Gurobi with CDO-derived u ──────────────────────────────────
-    stack.stack(f'ECHO TMAOPT: Phase 2 — Gurobi optimisation with CDO travel times ...')
-    result = None
-    t_opt_start = time.time()
-    for eps in eps_sequence:
-        stack.stack(f'ECHO TMAOPT: Trying epsilon={eps} ({n_ac} aircraft) ...')
-        t_eps_start = time.time()
-        result = _run_optimisation(aircraft_by_entry, ref_unix, epsilon=eps,
-                                   time_limit_override=time_limit_per_eps,
-                                   s1=s1, s2=s2,
-                                   u_override=u_override)
-        t_eps = time.time() - t_eps_start
-        if result is None:
-            stack.stack('ECHO TMAOPT: Optimisation failed (model error).')
-            return
-        if result['feasible']:
-            stack.stack(f'ECHO TMAOPT: epsilon={eps} solved in {t_eps:.1f}s')
-            break
-        stack.stack(f'ECHO TMAOPT: epsilon={eps} → status={result["status"]}  {t_eps:.1f}s, trying next ...')
-    t_opt_total = time.time() - t_opt_start
-
-    if result is None:
-        stack.stack('ECHO TMAOPT: Optimisation failed.')
-        return
-
-    result['cdo_params']        = cdo_params or {}
-    result['aircraft_by_entry'] = aircraft_by_entry
-    result['ref_unix']          = ref_unix
-
-    # Save result pkl
-    with open(out_dir / 'result.pkl', 'wb') as f:
-        pickle.dump(result, f)
-
-    # Save horizontal-tree .scn
-    scn_path = _save_scn(out_dir, result, ts, aircraft_by_entry)
-
-    eps_used = result.get('epsilon', '?')
-    if result['feasible']:
-        stack.stack(
-            f'ECHO TMAOPT: FEASIBLE  obj={result["objective"]:.2f}  '
-            f'ac={result["n_aircraft"]}  eps={eps_used}  '
-            f'merges={len(result["merge_points"])}  links={len(result["tree_links"])}  '
-            f'time={t_precompute + t_opt_total:.1f}s'
-        )
-    else:
-        stack.stack(
-            f'ECHO TMAOPT: INFEASIBLE after all epsilon values  '
-            f'ac={result["n_aircraft"]}  time={t_precompute + t_opt_total:.1f}s'
-        )
-
-    stack.stack(f'ECHO TMAOPT: Saved → {out_dir.relative_to(_REPO_ROOT)}')
-    stack.stack(f'ECHO TMAOPT: SCN: {scn_path.name}')
-
-    # ── Phase 3: CDO on optimal routes → final CDO CSV + SCN ─────────────────
-    if result['feasible']:
-        stack.stack('ECHO TMAOPT: Phase 3 — generating CDO profiles on optimal routes ...')
-        try:
-            _run_cdogenopt_inline(result, out_dir)
-        except Exception as _cdo_err:
-            stack.stack(f'ECHO TMAOPT: CDOGENOPT error: {_cdo_err}')
+    return aircraft_by_entry, len(arriving)

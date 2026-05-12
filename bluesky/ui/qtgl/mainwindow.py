@@ -469,6 +469,198 @@ class TMAOptDialog(QDialog):
         self.accept()
 
 
+class TMARollingDialog(QDialog):
+    """Dialog for running the rolling TMA optimizer over a ≥2h window."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Rolling TMA Optimization')
+        self.setModal(True)
+        self.setMinimumWidth(400)
+
+        root = QVBoxLayout(self)
+        root.setSpacing(8)
+
+        # ── Time window ──────────────────────────────────────────────
+        dt_group = QGroupBox('Traffic Time Window (UTC)')
+        dt_form  = QFormLayout(dt_group)
+
+        from PyQt6.QtCore import QDateTime
+        now_qt     = QDateTime.currentDateTimeUtc()
+        default_dt = now_qt.addSecs(-3600)
+
+        self.date_edit = QDateEdit(default_dt.date())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat('yyyy-MM-dd')
+        dt_form.addRow('Date:', self.date_edit)
+
+        self.time_edit = QTimeEdit(default_dt.time())
+        self.time_edit.setDisplayFormat('HH:mm')
+        dt_form.addRow('End Time (UTC):', self.time_edit)
+
+        self.duration_spin = QSpinBox()
+        self.duration_spin.setRange(120, 480)
+        self.duration_spin.setValue(120)
+        self.duration_spin.setSuffix(' min')
+        self.duration_spin.setToolTip('Total rolling window (minimum 120 min = 2 hours)')
+        dt_form.addRow('Total Duration:', self.duration_spin)
+
+        root.addWidget(dt_group)
+
+        # ── Entry points ─────────────────────────────────────────────
+        entry_group  = QGroupBox('Active Entry Points')
+        entry_layout = QHBoxLayout(entry_group)
+        self.cb_N = QCheckBox('N'); self.cb_N.setChecked(True)
+        self.cb_E = QCheckBox('E'); self.cb_E.setChecked(True)
+        self.cb_S = QCheckBox('S'); self.cb_S.setChecked(True)
+        self.cb_W = QCheckBox('W'); self.cb_W.setChecked(True)
+        for cb in (self.cb_N, self.cb_E, self.cb_S, self.cb_W):
+            entry_layout.addWidget(cb)
+        root.addWidget(entry_group)
+
+        # ── Optimisation parameters ───────────────────────────────────
+        opt_group = QGroupBox('Optimisation Parameters')
+        opt_form  = QFormLayout(opt_group)
+
+        self.max_ac_spin = QSpinBox()
+        self.max_ac_spin.setRange(2, 40)
+        self.max_ac_spin.setValue(15)
+        opt_form.addRow('Max aircraft:', self.max_ac_spin)
+
+        self.max_ac_per_entry_spin = QSpinBox()
+        self.max_ac_per_entry_spin.setRange(1, 10)
+        self.max_ac_per_entry_spin.setValue(5)
+        opt_form.addRow('Max ac / entry:', self.max_ac_per_entry_spin)
+
+        self.max_eps_spin = QSpinBox()
+        self.max_eps_spin.setRange(0, 10)
+        self.max_eps_spin.setValue(3)
+        self.max_eps_spin.setSuffix(' min')
+        opt_form.addRow('Max epsilon:', self.max_eps_spin)
+
+        self.time_limit_spin = QSpinBox()
+        self.time_limit_spin.setRange(30, 600)
+        self.time_limit_spin.setValue(120)
+        self.time_limit_spin.setSuffix(' s')
+        opt_form.addRow('Time limit / attempt:', self.time_limit_spin)
+
+        self.s1_spin = QSpinBox()
+        self.s1_spin.setRange(1, 10)
+        self.s1_spin.setValue(2)
+        self.s1_spin.setSuffix(' min')
+        opt_form.addRow('Sep Heavy–Heavy (s1):', self.s1_spin)
+
+        self.s2_spin = QSpinBox()
+        self.s2_spin.setRange(1, 10)
+        self.s2_spin.setValue(3)
+        self.s2_spin.setSuffix(' min')
+        opt_form.addRow('Sep Heavy–Med (s2):', self.s2_spin)
+
+        self.fetch_radius_spin = QSpinBox()
+        self.fetch_radius_spin.setRange(10, 400)
+        self.fetch_radius_spin.setValue(50)
+        self.fetch_radius_spin.setSuffix(' nm')
+        opt_form.addRow('Fetch radius:', self.fetch_radius_spin)
+
+        root.addWidget(opt_group)
+
+        # ── CDO Parameters ────────────────────────────────────────────
+        cdo_group = QGroupBox('CDO Parameters')
+        cdo_form  = QFormLayout(cdo_group)
+
+        self.cdo_fap_alt_spin = QSpinBox()
+        self.cdo_fap_alt_spin.setRange(500, 5000)
+        self.cdo_fap_alt_spin.setValue(2000)
+        self.cdo_fap_alt_spin.setSuffix(' ft')
+        cdo_form.addRow('FAP altitude:', self.cdo_fap_alt_spin)
+
+        self.cdo_ias_start_spin = QSpinBox()
+        self.cdo_ias_start_spin.setRange(100, 350)
+        self.cdo_ias_start_spin.setValue(200)
+        self.cdo_ias_start_spin.setSuffix(' kt')
+        cdo_form.addRow('IAS at FAP:', self.cdo_ias_start_spin)
+
+        self.cdo_ias_restrict_spin = QSpinBox()
+        self.cdo_ias_restrict_spin.setRange(150, 350)
+        self.cdo_ias_restrict_spin.setValue(220)
+        self.cdo_ias_restrict_spin.setSuffix(' kt')
+        cdo_form.addRow('IAS restriction:', self.cdo_ias_restrict_spin)
+
+        self.cdo_mach_spin = QDoubleSpinBox()
+        self.cdo_mach_spin.setRange(0.60, 0.95)
+        self.cdo_mach_spin.setValue(0.84)
+        self.cdo_mach_spin.setSingleStep(0.01)
+        self.cdo_mach_spin.setDecimals(2)
+        cdo_form.addRow('M descent:', self.cdo_mach_spin)
+
+        self.cdo_mlw_spin = QDoubleSpinBox()
+        self.cdo_mlw_spin.setRange(0.5, 1.0)
+        self.cdo_mlw_spin.setValue(0.9)
+        self.cdo_mlw_spin.setSingleStep(0.05)
+        self.cdo_mlw_spin.setDecimals(2)
+        cdo_form.addRow('Mass (×MLW):', self.cdo_mlw_spin)
+
+        self.cdo_kt_per_sec_spin = QDoubleSpinBox()
+        self.cdo_kt_per_sec_spin.setRange(0.1, 5.0)
+        self.cdo_kt_per_sec_spin.setValue(1.0)
+        self.cdo_kt_per_sec_spin.setSingleStep(0.1)
+        self.cdo_kt_per_sec_spin.setDecimals(1)
+        cdo_form.addRow('Decel rate:', self.cdo_kt_per_sec_spin)
+
+        self.cdo_wind_cb = QCheckBox('Use ERA5 wind/temperature')
+        self.cdo_wind_cb.setChecked(True)
+        cdo_form.addRow('', self.cdo_wind_cb)
+
+        self.cdo_c_v_min_spin = QDoubleSpinBox()
+        self.cdo_c_v_min_spin.setRange(1.0, 1.5)
+        self.cdo_c_v_min_spin.setValue(1.23)
+        self.cdo_c_v_min_spin.setSingleStep(0.01)
+        self.cdo_c_v_min_spin.setDecimals(2)
+        cdo_form.addRow('C_v_min:', self.cdo_c_v_min_spin)
+
+        root.addWidget(cdo_group)
+
+        # ── Buttons ───────────────────────────────────────────────────
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def _on_accept(self):
+        date_str = self.date_edit.date().toString('yyyy-MM-dd')
+        time_str = self.time_edit.time().toString('HH:mm')
+        dt_str   = f'{date_str}T{time_str}'
+        duration = self.duration_spin.value()
+        entries  = ''.join(
+            d for d, cb in (('N', self.cb_N), ('E', self.cb_E),
+                            ('S', self.cb_S), ('W', self.cb_W)) if cb.isChecked()
+        ) or 'NESW'
+        max_ac           = self.max_ac_spin.value()
+        max_ac_per_entry = self.max_ac_per_entry_spin.value()
+        max_eps          = self.max_eps_spin.value()
+        time_limit       = self.time_limit_spin.value()
+        s1               = self.s1_spin.value()
+        s2               = self.s2_spin.value()
+        fetch_radius     = self.fetch_radius_spin.value()
+        cdo_fap_alt      = self.cdo_fap_alt_spin.value()
+        cdo_ias_start    = self.cdo_ias_start_spin.value()
+        cdo_ias_restrict = self.cdo_ias_restrict_spin.value()
+        cdo_mach         = self.cdo_mach_spin.value()
+        cdo_mlw          = self.cdo_mlw_spin.value()
+        cdo_kt_per_sec   = self.cdo_kt_per_sec_spin.value()
+        cdo_wind         = int(self.cdo_wind_cb.isChecked())
+        cdo_c_v_min      = self.cdo_c_v_min_spin.value()
+        stack.stack(
+            f'TMAROLLING {dt_str} {duration} {entries} {max_ac} {max_ac_per_entry} '
+            f'{max_eps} {time_limit} {s1} {s2} {fetch_radius} '
+            f'{cdo_fap_alt} {cdo_ias_start} {cdo_ias_restrict} {cdo_mach} '
+            f'{cdo_mlw} {cdo_kt_per_sec} {cdo_wind} {cdo_c_v_min}'
+        )
+        self.accept()
+
+
 class MainWindow(QMainWindow, Base):
     """ Qt window process: from .ui file read UI window-definition of main window """
 
@@ -890,6 +1082,8 @@ class MainWindow(QMainWindow, Base):
             stack.stack('CDOGEN')
         elif self.sender() == self.custom5:
             self._open_tmaopt_dialog()
+        elif self.sender() == self.custom6:
+            self._open_tmarolling_dialog()
         elif hasattr(self.sender(), 'server_id'):
             bs.net.send(b'ADDNODES', 1, self.sender().server_id)
 
@@ -935,4 +1129,8 @@ class MainWindow(QMainWindow, Base):
 
     def _open_tmaopt_dialog(self):
         dlg = TMAOptDialog(self)
+        dlg.exec()
+
+    def _open_tmarolling_dialog(self):
+        dlg = TMARollingDialog(self)
         dlg.exec()

@@ -1042,7 +1042,7 @@ def _run_cdoprecompute_inline(result: dict):
     return u_table, fuel_table
 
 
-def _run_cdogenopt_inline(result: dict, out_dir: Path):
+def _run_cdogenopt_inline(result: dict, out_dir: Path, stem_override: str = None):
     """CDO on optimal routes, called inline from _run_tmaopt after Phase 2."""
     from datetime import datetime, timezone as _tz
 
@@ -1051,7 +1051,7 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path):
     ref_unix     = result.get('ref_unix', 0)
     cdo_params   = result.get('cdo_params', {})
     callsign_map = result.get('callsign_map', {})
-    stem         = out_dir.name
+    stem         = stem_override if stem_override else out_dir.name
 
     if not ac_path:
         stack.stack('ECHO TMAOPT: CDOGENOPT — no ac_path in result, skipping.')
