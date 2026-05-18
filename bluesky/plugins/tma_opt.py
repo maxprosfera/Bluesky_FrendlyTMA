@@ -73,7 +73,7 @@ def _is_ga_icao24(icao24: str) -> bool:
 
 
 # ── ICAO wake turbulence categories ─────────────────────────────────────────
-# H = Heavy (s1=2 min separation), M/L = Medium/Light (s2=3 min separation)
+# H = Heavy (s1 separation), M/L = Medium/Light (s2 separation)
 _WAKE_HEAVY = {
     'A124','A225','A306','A30B','A310','A318','A319','A320','A321',
     'A332','A333','A338','A339','A342','A343','A345','A346',
