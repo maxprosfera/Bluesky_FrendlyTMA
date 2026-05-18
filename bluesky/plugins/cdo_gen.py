@@ -74,7 +74,7 @@ _VD_DES     = [5.0, 10.0, 10.0, 10.0]   # [kt] speed deltas for bands 1-4
 # The horizontal (lat/lon) path is kept IDENTICAL to the observed track.
 # Only the vertical profile (alt, rocd) and speed are replaced by the
 # ideal idle-thrust CDO schedule.
-_CDO_FAP_ALT_M   = 2000.0 * _FT_TO_M    # 609.6 m  — FAP (Final Approach Point)
+_CDO_FAP_ALT_M   = 2500.0 * _FT_TO_M    # 762.0 m  — FAF/FAP for ESSA ILS RWY 01L (SSA DME 7.6)
 _CDO_END_ALT_M   = 0.0                   # ground level
 
 # ESSA airport coordinates
@@ -468,7 +468,7 @@ def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0,
             trk = 0.0
             if node_unix_times is not None and len(node_unix_times) > 0:
                 t = float(node_unix_times[0])
-        # Linearly interpolate altitude from entry (alt_entry) down to FAP (609.6 m)
+        # Linearly interpolate altitude from entry (alt_entry) down to FAP (762.0 m / 2500 ft)
         # so _cdo_for_aircraft sees a realistic descending track, not a flat 3000 m sheet.
         frac     = i / max(n - 1, 1)
         node_alt = alt_entry + frac * (_CDO_FAP_ALT_M - alt_entry)
@@ -487,8 +487,8 @@ def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0,
             'vertical_rate_ms': -5.0,
         })
 
-    # Append the runway node (N_exit = 72) at ground level so the CDO profile
-    # continues all the way to landing rather than stopping at the last grid node.
+    # Append the FAF node (N_exit = 72, repositioned to ESSA ILS RWY 01L FAF
+    # at SSA DME 7.6 NM: 59.5114°N 17.9393°E, 2500 ft) so the CDO ends at the FAF.
     _N_EXIT = 72
     rwy_lat, rwy_lon = _GRID_COORDS[_N_EXIT]
     if rows and (rows[-1]['lat'] != rwy_lat or rows[-1]['lon'] != rwy_lon):
@@ -505,9 +505,9 @@ def _grid_rows_from_nodes(node_list, ref_time_unix, speed_ms=200.0,
             'time':             t,
             'lat':              rwy_lat,
             'lon':              rwy_lon,
-            'baro_alt_m':       0.0,
+            'baro_alt_m':       _CDO_FAP_ALT_M,
             'true_track':       trk,
-            'on_ground':        True,
+            'on_ground':        False,
             'velocity_ms':      speed_ms * 0.5,
             'vertical_rate_ms': -5.0,
         })
