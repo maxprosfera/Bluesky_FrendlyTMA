@@ -1042,7 +1042,10 @@ def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
         stack.stack('ECHO TMAOPT: No aircraft found crossing TMA boundary.')
         return
 
-    # 4. Save aircraft CSV
+    # 4. Save aircraft CSV + selected.txt for traces plugin
+    all_selected = {a['callsign'].upper() for acs in aircraft_by_entry.values() for a in acs}
+    (out_dir / 'selected.txt').write_text('\n'.join(sorted(all_selected)) + '\n', encoding='utf-8')
+
     with open(out_dir / 'aircraft.csv', 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=[
             'callsign','icao24','entry','node','lat','lon',
