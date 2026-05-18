@@ -20,6 +20,8 @@ Output:    scenario/OpenSky/<stem>_cdo.csv        — per-second CDO tracks
 
 import csv
 import math
+import multiprocessing
+import os
 import threading
 from pathlib import Path
 
@@ -76,6 +78,11 @@ _VD_DES     = [5.0, 10.0, 10.0, 10.0]   # [kt] speed deltas for bands 1-4
 # ideal idle-thrust CDO schedule.
 _CDO_FAP_ALT_M   = 2500.0 * _FT_TO_M    # 762.0 m  — FAF/FAP for ESSA ILS RWY 01L (SSA DME 7.6)
 _CDO_END_ALT_M   = 0.0                   # ground level
+
+# Pre-spawned worker pool — created at module import time (before Qt starts)
+# so workers use fork-inherited state rather than spawning cold under the GUI.
+_N_CDO_WORKERS = max(1, (os.cpu_count() or 4))
+_CDO_POOL = multiprocessing.Pool(processes=_N_CDO_WORKERS)
 
 # ESSA airport coordinates
 _ESSA_LAT = 59.6519
@@ -1014,29 +1021,23 @@ def _run_cdoprecompute_inline(result: dict):
 
     from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm
 
-    import concurrent.futures, os
-    n_workers = max(1, min(os.cpu_count() or 4, n_ac))
-
     args_list = [
         (ac_idx, ac, all_paths, ac.get('crossing_time') or ref_unix, mlw_factor, weather)
         for ac_idx, ac in enumerate(all_ac)
     ]
 
     completed = 0
-    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_precompute_one_aircraft, args): args[0]
-                   for args in args_list}
-        for fut in concurrent.futures.as_completed(futures):
-            try:
-                ac_idx, u_dict, fuel_dict = fut.result()
-            except Exception as _e:
-                ac_idx = futures[fut]
-                u_dict, fuel_dict = {}, {}
-            u_table[ac_idx]    = u_dict
-            fuel_table[ac_idx] = fuel_dict
-            completed += 1
-            if completed % 3 == 0 or completed == n_ac:
-                stack.stack(f'ECHO TMAOPT: CDO precompute — {completed}/{n_ac} done ...')
+    for result in _CDO_POOL.imap_unordered(_precompute_one_aircraft, args_list):
+        try:
+            ac_idx, u_dict, fuel_dict = result
+        except Exception as _e:
+            ac_idx = completed
+            u_dict, fuel_dict = {}, {}
+        u_table[ac_idx]    = u_dict
+        fuel_table[ac_idx] = fuel_dict
+        completed += 1
+        if completed % 3 == 0 or completed == n_ac:
+            stack.stack(f'ECHO TMAOPT: CDO precompute — {completed}/{n_ac} done ...')
 
     _restore_cdo_params(old_params)
     return u_table, fuel_table
