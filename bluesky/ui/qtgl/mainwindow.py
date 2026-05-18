@@ -370,7 +370,7 @@ class TMAOptDialog(QDialog):
 
         self.cdo_fap_alt_spin = QSpinBox()
         self.cdo_fap_alt_spin.setRange(500, 5000)
-        self.cdo_fap_alt_spin.setValue(2000)
+        self.cdo_fap_alt_spin.setValue(2500)
         self.cdo_fap_alt_spin.setSuffix(' ft')
         self.cdo_fap_alt_spin.setToolTip('Final Approach Point altitude — CDO ends here')
         cdo_form.addRow('FAP altitude:', self.cdo_fap_alt_spin)
@@ -570,7 +570,7 @@ class TMARollingDialog(QDialog):
 
         self.cdo_fap_alt_spin = QSpinBox()
         self.cdo_fap_alt_spin.setRange(500, 5000)
-        self.cdo_fap_alt_spin.setValue(2000)
+        self.cdo_fap_alt_spin.setValue(2500)
         self.cdo_fap_alt_spin.setSuffix(' ft')
         cdo_form.addRow('FAP altitude:', self.cdo_fap_alt_spin)
 
