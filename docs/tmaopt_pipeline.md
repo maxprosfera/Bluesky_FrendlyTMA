@@ -207,8 +207,8 @@ Minimises weighted tree edge length (infrastructure cost, 10%) plus traffic-weig
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `s1` | 2 min | Heavy–Heavy and Heavy–Medium separation |
-| `s2` | 3 min | Medium–Heavy separation |
+| `s1` | 2 min | Heavy–Medium and Heavy–Light separation |
+| `s2` | 3 min | Medium–Light separation |
 
 Heavy types include: B744, B748, B77W, B788, B789, A332, A333, A359, A388, A124, C5, AN12, and others.
 
@@ -369,8 +369,8 @@ scenario/TMAOpt/tmaopt_<YYYYMMDD_HHMMSS>/
 | `max_ac_per_entry` | 5 | Per-entry cap |
 | `max_eps` | 3 | Maximum flexibility window (minutes) |
 | `time_limit_per_eps` | 120 | Gurobi time limit per epsilon (seconds) |
-| `s1` | 2 | H–H and H–M wake separation (minutes) |
-| `s2` | 3 | M–H wake separation (minutes) |
+| `s1` | 2 | H–M and H–L wake separation (minutes) |
+| `s2` | 3 | M–L wake separation (minutes) |
 | `fetch_radius` | 50 | Bounding box half-size (nm) |
 | `cdo_fap_alt` | 2000 | Final Approach Point altitude (ft) |
 | `cdo_ias_start` | 200 | Initial CAS at TMA entry (kt) |

@@ -178,8 +178,8 @@ Backward sequence is flipped → forward CDO profile. Lat/lon interpolated along
 | Pair | Min separation |
 |------|---------------|
 | Heavy → Medium | s1 min |
-| Medium → Heavy | s2 min |
-| Heavy → Heavy  | s1 min |
+| Medium → Light | s2 min |
+| Heavy → Light  | s1 min |
 | Medium → Medium | s1 min |
 
 ### Epsilon Loop
