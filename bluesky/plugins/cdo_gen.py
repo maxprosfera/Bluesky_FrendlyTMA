@@ -1018,7 +1018,7 @@ def _run_cdoprecompute_inline(result: dict):
     n_workers = max(1, min(os.cpu_count() or 4, n_ac))
 
     args_list = [
-        (ac_idx, ac, all_paths, ref_unix, mlw_factor, weather)
+        (ac_idx, ac, all_paths, ac.get('crossing_time') or ref_unix, mlw_factor, weather)
         for ac_idx, ac in enumerate(all_ac)
     ]
 
@@ -1081,23 +1081,14 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path, stem_override: str = None
         icao24   = ac.get('icao24', '')
         speed_ms = ac.get('velocity_ms', 200.0)
 
-        # Compute per-node arrival times from Gurobi schedule (entry_min + cumulative u).
-        # This preserves the exact separation the optimizer enforced, independent of
-        # CDO physics travel speed which can differ from u.
-        u_table  = result.get('u', {})
-        pl       = len(node_list) - 1
-        node_unix_times = []
-        t_min = entry_min
-        for step_idx in range(pl + 1):
-            node_unix_times.append(midnight.timestamp() + t_min * 60.0)
-            if step_idx < pl:
-                t_min += u_table.get((ac_id, pl, step_idx + 1), 2)
-
-        entry_unix  = node_unix_times[0]
+        # Anchor CDO to the entry time Gurobi assigned (entry_min from midnight).
+        # Let CDO physics determine timestamps at each node naturally — no override.
+        # This ensures the CDO profile (speed, altitude, fuel) and its timing are
+        # internally consistent with BADA physics and ERA5 wind.
+        entry_unix  = midnight.timestamp() + entry_min * 60.0
         entry_alt_m = ac.get('alt_m') or ac.get('baro_alt_m')
         rows = _grid_rows_from_nodes(node_list, entry_unix, speed_ms=speed_ms,
-                                     entry_alt_m=entry_alt_m,
-                                     node_unix_times=node_unix_times)
+                                     entry_alt_m=entry_alt_m)
         if not rows:
             errors.append(f'{cs}: empty path rows')
             continue
