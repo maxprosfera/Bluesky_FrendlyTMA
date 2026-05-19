@@ -81,7 +81,7 @@ Written to `scenario/TMAOpt/tmaopt_<ts>/`:
 
 **Purpose:** compute physics-accurate edge travel times for every aircraft on every possible grid path (3821 paths). These replace the constant speed estimate in Gurobi.
 
-**Parallelism:** `ProcessPoolExecutor` with `min(cpu_count, n_ac)` workers. Each worker handles one aircraft — `_precompute_one_aircraft(args)`.
+**Parallelism:** module-level `multiprocessing.Pool` (created at import time, before Qt) with `cpu_count` workers. Jobs are dispatched via `imap_unordered` so results are processed as they complete. Each worker handles one aircraft — `_precompute_one_aircraft(args)`.
 
 ### Per aircraft × per path (`_precompute_one_aircraft`):
 
@@ -182,6 +182,15 @@ Backward sequence is flipped → forward CDO profile. Lat/lon interpolated along
 | Heavy → Light  | s1 min |
 | Medium → Medium | s1 min |
 
+6. **Converging-edge mid-point separation:** node-level constraints cannot prevent two aircraft from physically crossing mid-edge when they approach the same node from different grid directions (H/V/D). For each such converging pair `(i1→j, i2→j)`, an additional set of big-M constraints is added:
+
+   - `xi_mid[a,k,j] = xi[a,k,j] − round(u_edge/2)` — base mid-edge arrival time (no epsilon shift)
+   - Actual mid-arrival with epsilon shift `t1`: `xi_mid[a,k,j] + t1`
+   - For every aircraft pair `(a1,k1)` on `i1→j` and `(a2,k2)` on `i2→j`, and each time `t`:
+     - If `a2` mid-arrival could equal `t` **and** `a1` mid-arrival could fall in `[t−s1+1, t]`:
+     - Add `Σ tau[a1,k1,…] ≤ ω × (1 − Σ tau[a2,k2,…])`
+   - This mirrors the omega big-M formulation of constraint 5 and correctly covers all epsilon-shift combinations.
+
 ### Epsilon Loop
 
 The solver tries `epsilon = [0, 2, 3, ..., max_eps]` in order, stopping at the first feasible solution. With `epsilon=0` aircraft must enter at exactly `ta1`; with larger values they may shift ±epsilon minutes.
@@ -278,7 +287,8 @@ _precompute_one_aircraft()                   _run_optimisation()
     │    _cdo_for_aircraft() BADA 4.2             │    rho, X_new, tau
     │    → edge_times [min/edge]                  │    objective: tree length
     │                                             │    constraints: tree structure,
-    ▼                                             │    no crossings, wake sep
+    ▼                                             │    no crossings, wake sep (nodes),
+                                                  │    converging-edge mid-point sep
 u_table[ac_idx][path_idx] = [times]              │
     │                                             │
     └────────────────────────────────────────►  Gurobi.optimize()
