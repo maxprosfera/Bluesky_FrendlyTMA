@@ -907,6 +907,10 @@ def _precompute_one_aircraft(args):
     """
     (ac_idx, ac, all_paths, ref_unix, mlw_factor, weather) = args
 
+    import sys as _sys
+    _REPO_ROOT_STR = str(_REPO_ROOT)
+    if _REPO_ROOT_STR not in _sys.path:
+        _sys.path.insert(0, _REPO_ROOT_STR)
     from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm
 
     cs       = ac.get('callsign', f'AC{ac_idx}')
@@ -1011,27 +1015,51 @@ def _run_cdoprecompute_inline(result: dict):
     u_table    = {}
     fuel_table = {}
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     args_list = [
         (ac_idx, ac, all_paths, ac.get('crossing_time') or ref_unix, mlw_factor, weather)
         for ac_idx, ac in enumerate(all_ac)
     ]
 
+    import queue as _queue
+    import threading as _threading
+    import multiprocessing as _mp
+
+    result_q  = _queue.Queue()
+    progress_q = _queue.Queue()
+
+    def _pool_runner():
+        try:
+            with _mp.Pool(processes=_N_CDO_WORKERS) as pool:
+                for res in pool.imap_unordered(_precompute_one_aircraft, args_list):
+                    result_q.put(res)
+        except Exception as exc:
+            result_q.put(exc)
+        finally:
+            result_q.put(None)
+
+    runner = _threading.Thread(target=_pool_runner, daemon=False)
+    runner.start()
+
     completed = 0
-    with ThreadPoolExecutor(max_workers=_N_CDO_WORKERS) as executor:
-        futures = {executor.submit(_precompute_one_aircraft, a): a[0] for a in args_list}
-        for fut in as_completed(futures):
-            try:
-                ac_idx, u_dict, fuel_dict = fut.result()
-            except Exception:
-                ac_idx = futures[fut]
-                u_dict, fuel_dict = {}, {}
-            u_table[ac_idx]    = u_dict
-            fuel_table[ac_idx] = fuel_dict
-            completed += 1
-            if completed % 3 == 0 or completed == n_ac:
-                stack.stack(f'ECHO TMAOPT: CDO precompute — {completed}/{n_ac} done ...')
+    while True:
+        item = result_q.get()
+        if item is None:
+            break
+        if isinstance(item, Exception):
+            stack.stack(f'ECHO TMAOPT: CDO precompute error: {item}')
+            break
+        try:
+            ac_idx, u_dict, fuel_dict = item
+        except Exception:
+            ac_idx = completed
+            u_dict, fuel_dict = {}, {}
+        u_table[ac_idx]    = u_dict
+        fuel_table[ac_idx] = fuel_dict
+        completed += 1
+        if completed % 3 == 0 or completed == n_ac:
+            stack.stack(f'ECHO TMAOPT: CDO precompute — {completed}/{n_ac} done ...')
+
+    runner.join()
 
     _restore_cdo_params(old_params)
     return u_table, fuel_table
