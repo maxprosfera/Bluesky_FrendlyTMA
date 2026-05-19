@@ -687,6 +687,122 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         for j1 in B for a1 in AC2[j1] for i in NODES for t in range(T_start, T_end)
     )
 
+    # ── Converging-edge mid-point separation ─────────────────────────────────
+    # For each node j with multiple incoming edges from different directions,
+    # two aircraft on those edges may physically cross mid-edge even if their
+    # node-arrival times differ by >= s1.
+    # mid_arrival(a,k,j,t1) = xi_mid[a,k,j] + t1  where t1 is the epsilon shift
+    # Constraint: for each (a1,k1,t1) x (a2,k2,t2) pair that would place both
+    # aircraft within s1 minutes of each other at the mid-edge point, forbid
+    # both tau variables being 1 simultaneously.
+    # Pattern mirrors the existing wake-turbulence constraints (lines above).
+
+    def _edge_dir(src, dst):
+        d = abs(src - dst)
+        if d == 1:  return 'H'
+        if d == 11: return 'V'
+        return 'D'
+
+    # Build converging pairs: (i1,j),(i2,j) with different directions
+    from collections import defaultdict as _dd
+    _incoming = _dd(list)
+    for (i, j) in LINKS:
+        _incoming[j].append(i)
+
+    converging_pairs = []
+    for j, srcs in _incoming.items():
+        for idx1 in range(len(srcs)):
+            for idx2 in range(idx1 + 1, len(srcs)):
+                i1, i2 = srcs[idx1], srcs[idx2]
+                if _edge_dir(i1, j) != _edge_dir(i2, j):
+                    converging_pairs.append((i1, i2, j))
+
+    if converging_pairs:
+        # xi_mid[a,k,j] = base mid-edge arrival time (relative to ta1, no epsilon shift)
+        xi_mid = {}
+        for bi in range(len(B)):
+            for a in AC[B[bi]]:
+                for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
+                    path = all_paths[k]
+                    pl   = len(path) - 1
+                    for step_idx, node_j in enumerate(path[1:], start=1):
+                        node_j_arr = xi.get((a, k, node_j))
+                        if node_j_arr is None:
+                            continue
+                        u_edge = u.get((a, pl, step_idx), s1)
+                        xi_mid[a, k, node_j] = node_j_arr - round(u_edge / 2)
+
+        # pnt_mid_xi[a, j, t] = list of k where xi_mid[a,k,j] == t  (exact arrival)
+        # pnt_mid_sigma[a, j, t] = list of k where xi_mid[a,k,j] in [t-s1+1, t]
+        # These mirror pnt_xi / path_node_time_sigma but for mid-edge times.
+        pnt_mid_xi    = {}
+        pnt_mid_sigma = {}
+        for (a, k, j), t_mid in xi_mid.items():
+            pnt_mid_xi.setdefault((a, j, t_mid), []).append(k)
+            for t_check in range(t_mid, t_mid + s1):
+                pnt_mid_sigma.setdefault((a, j, t_check), []).append(k)
+        for bi in range(len(B)):
+            for a in AC[B[bi]]:
+                for j in NODES:
+                    for t in range(T_start - 10, T_end + 10):
+                        pnt_mid_xi.setdefault((a, j, t), [])
+                        pnt_mid_sigma.setdefault((a, j, t), [])
+
+        # For each converging pair, build per-edge aircraft sets: (a,k,bi,entry_b)
+        for (i1, i2, j) in converging_pairs:
+            ac_e1 = []  # (a, k, bi) using edge i1→j
+            ac_e2 = []  # (a, k, bi) using edge i2→j
+            for bi in range(len(B)):
+                for a in AC[B[bi]]:
+                    for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
+                        path = all_paths[k]
+                        if j in path:
+                            idx_j = path.index(j)
+                            if idx_j > 0:
+                                if path[idx_j - 1] == i1:
+                                    ac_e1.append((a, k, bi))
+                                elif path[idx_j - 1] == i2:
+                                    ac_e2.append((a, k, bi))
+
+            if not ac_e1 or not ac_e2:
+                continue
+
+            # Constraint pattern (mirrors wake-turbulence):
+            # For each time t: if any a2 on edge i2→j has exact mid-arrival t
+            #   (i.e. tau[a2,k2,ta1+t1] with xi_mid[a2,k2,j]+t1 == t),
+            # then no a1 on edge i1→j may have mid-arrival in [t-s1+1, t].
+            # We add one constraint per (a1_on_e1, a2_on_e2, t) triple to avoid
+            # the cross-aircraft summation mixing unrelated aircraft.
+            for (a1, k1, bi1) in ac_e1:
+                for (a2, k2, bi2) in ac_e2:
+                    if a1 == a2:
+                        continue
+                    base1 = ta1[B[bi1], a1]
+                    base2 = ta1[B[bi2], a2]
+                    for t in range(T_start, T_end):
+                        # paths for a1 where mid-edge arrival is in [t-s1+1, t]
+                        ks1 = [k1] if k1 in pnt_mid_sigma.get((a1, j, t), []) else []
+                        # paths for a2 where mid-edge arrival is exactly t
+                        ks2 = [k2] if k2 in pnt_mid_xi.get((a2, j, t), []) else []
+                        if not ks1 or not ks2:
+                            continue
+                        lhs = gp.quicksum(
+                            tau[a1, k, base1 + t1]
+                            for t1 in range(-epsilon, epsilon + 1)
+                            for k in ks1
+                            if (a1, k, base1 + t1) in tau and (t - t1) <= T_end
+                        )
+                        rhs_sum = gp.quicksum(
+                            tau[a2, k, base2 + t1]
+                            for t1 in range(-epsilon, epsilon + 1)
+                            for k in ks2
+                            if (a2, k, base2 + t1) in tau and (t - t1) <= T_end
+                        )
+                        model.addConstr(
+                            lhs <= omega * (1 - rhs_sum),
+                            name=f'conv_{i1}_{i2}_{j}_{a1}_{a2}_{t}'
+                        )
+
     model.update()
     stack.stack('ECHO TMAOPT: Solving Gurobi model ...')
     model.optimize()
