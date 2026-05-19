@@ -732,23 +732,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
                         u_edge = u.get((a, pl, step_idx), s1)
                         xi_mid[a, k, node_j] = node_j_arr - round(u_edge / 2)
 
-        # pnt_mid_xi[a, j, t] = list of k where xi_mid[a,k,j] == t  (exact arrival)
-        # pnt_mid_sigma[a, j, t] = list of k where xi_mid[a,k,j] in [t-s1+1, t]
-        # These mirror pnt_xi / path_node_time_sigma but for mid-edge times.
-        pnt_mid_xi    = {}
-        pnt_mid_sigma = {}
-        for (a, k, j), t_mid in xi_mid.items():
-            pnt_mid_xi.setdefault((a, j, t_mid), []).append(k)
-            for t_check in range(t_mid, t_mid + s1):
-                pnt_mid_sigma.setdefault((a, j, t_check), []).append(k)
-        for bi in range(len(B)):
-            for a in AC[B[bi]]:
-                for j in NODES:
-                    for t in range(T_start - 10, T_end + 10):
-                        pnt_mid_xi.setdefault((a, j, t), [])
-                        pnt_mid_sigma.setdefault((a, j, t), [])
-
-        # For each converging pair, build per-edge aircraft sets: (a,k,bi,entry_b)
+        # For each converging pair, build per-edge aircraft sets: (a,k,bi)
         for (i1, i2, j) in converging_pairs:
             ac_e1 = []  # (a, k, bi) using edge i1→j
             ac_e2 = []  # (a, k, bi) using edge i2→j
@@ -768,40 +752,42 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
                 continue
 
             # Constraint pattern (mirrors wake-turbulence):
-            # For each time t: if any a2 on edge i2→j has exact mid-arrival t
-            #   (i.e. tau[a2,k2,ta1+t1] with xi_mid[a2,k2,j]+t1 == t),
-            # then no a1 on edge i1→j may have mid-arrival in [t-s1+1, t].
-            # We add one constraint per (a1_on_e1, a2_on_e2, t) triple to avoid
-            # the cross-aircraft summation mixing unrelated aircraft.
+            # Only iterate over t values where a2 actually has an exact mid-arrival,
+            # then check if a1 has a mid-arrival in [t-s1+1, t]. This avoids
+            # scanning the full T_start..T_end range (which was O(T×pairs) = millions).
             for (a1, k1, bi1) in ac_e1:
                 for (a2, k2, bi2) in ac_e2:
                     if a1 == a2:
                         continue
                     base1 = ta1[B[bi1], a1]
                     base2 = ta1[B[bi2], a2]
-                    for t in range(T_start, T_end):
-                        # paths for a1 where mid-edge arrival is in [t-s1+1, t]
-                        ks1 = [k1] if k1 in pnt_mid_sigma.get((a1, j, t), []) else []
-                        # paths for a2 where mid-edge arrival is exactly t
-                        ks2 = [k2] if k2 in pnt_mid_xi.get((a2, j, t), []) else []
-                        if not ks1 or not ks2:
-                            continue
-                        lhs = gp.quicksum(
-                            tau[a1, k, base1 + t1]
-                            for t1 in range(-epsilon, epsilon + 1)
-                            for k in ks1
-                            if (a1, k, base1 + t1) in tau and (t - t1) <= T_end
-                        )
-                        rhs_sum = gp.quicksum(
-                            tau[a2, k, base2 + t1]
-                            for t1 in range(-epsilon, epsilon + 1)
-                            for k in ks2
-                            if (a2, k, base2 + t1) in tau and (t - t1) <= T_end
-                        )
-                        model.addConstr(
-                            lhs <= omega * (1 - rhs_sum),
-                            name=f'conv_{i1}_{i2}_{j}_{a1}_{a2}_{t}'
-                        )
+                    # t values where a2 has an exact mid-arrival at node j
+                    t_mid2 = xi_mid.get((a2, k2, j))
+                    if t_mid2 is None:
+                        continue
+                    # t values where a1 mid-arrival in [t-s1+1, t] overlap with a2
+                    t_mid1 = xi_mid.get((a1, k1, j))
+                    if t_mid1 is None:
+                        continue
+                    # Only add constraint if mid-arrivals are within s1 for any epsilon shift
+                    # Actual mid-arrival with shift t1: t_mid + t1
+                    # Conflict if |(t_mid1+t1a) - (t_mid2+t1b)| < s1 for some t1a,t1b in [-eps,eps]
+                    # Min gap = |t_mid1 - t_mid2| - 2*epsilon
+                    if abs(t_mid1 - t_mid2) >= s1 + 2 * epsilon:
+                        continue
+                    # Add one constraint per conflicting (t1a, t1b) epsilon shift pair
+                    for t1a in range(-epsilon, epsilon + 1):
+                        for t1b in range(-epsilon, epsilon + 1):
+                            if abs((t_mid1 + t1a) - (t_mid2 + t1b)) >= s1:
+                                continue
+                            tau1 = tau.get((a1, k1, base1 + t1a))
+                            tau2 = tau.get((a2, k2, base2 + t1b))
+                            if tau1 is None or tau2 is None:
+                                continue
+                            model.addConstr(
+                                tau1 + tau2 <= 1,
+                                name=f'conv_{i1}_{i2}_{j}_{a1}_{a2}_{t1a}_{t1b}'
+                            )
 
     model.update()
     stack.stack('ECHO TMAOPT: Solving Gurobi model ...')
