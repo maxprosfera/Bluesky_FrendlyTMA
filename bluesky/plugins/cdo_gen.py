@@ -20,7 +20,6 @@ Output:    scenario/OpenSky/<stem>_cdo.csv        — per-second CDO tracks
 
 import csv
 import math
-import multiprocessing
 import os
 import threading
 from pathlib import Path
@@ -81,15 +80,6 @@ _CDO_END_ALT_M   = 0.0                   # ground level
 
 # Worker count for CDO parallelism
 _N_CDO_WORKERS = max(1, (os.cpu_count() or 4))
-
-# Worker-global shared state — set once per pool via initializer
-_W_ALL_PATHS = None
-_W_WEATHER   = None
-
-def _pool_init(all_paths, weather):
-    global _W_ALL_PATHS, _W_WEATHER
-    _W_ALL_PATHS = all_paths
-    _W_WEATHER   = weather
 
 # ESSA airport coordinates
 _ESSA_LAT = 59.6519
@@ -912,20 +902,12 @@ def _run_cdogenopt(pkl_arg: str):
 # ---------------------------------------------------------------------------
 
 def _precompute_one_aircraft(args):
-    """Top-level worker: compute u/fuel for one aircraft across all paths.
-    all_paths and weather are taken from worker globals set by _pool_init.
+    """Thread worker: compute u/fuel for one aircraft across all paths.
     Returns (ac_idx, u_dict, fuel_dict).
     """
-    (ac_idx, ac, ref_unix, mlw_factor) = args
+    (ac_idx, ac, all_paths, ref_unix, mlw_factor, weather) = args
 
-    import sys as _sys
-    _REPO_ROOT_STR = str(_REPO_ROOT)
-    if _REPO_ROOT_STR not in _sys.path:
-        _sys.path.insert(0, _REPO_ROOT_STR)
     from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm
-
-    all_paths = _W_ALL_PATHS
-    weather   = _W_WEATHER
 
     cs       = ac.get('callsign', f'AC{ac_idx}')
     icao24   = ac.get('icao24', '')
@@ -1029,24 +1011,21 @@ def _run_cdoprecompute_inline(result: dict):
     u_table    = {}
     fuel_table = {}
 
-    from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     args_list = [
-        (ac_idx, ac, ac.get('crossing_time') or ref_unix, mlw_factor)
+        (ac_idx, ac, all_paths, ac.get('crossing_time') or ref_unix, mlw_factor, weather)
         for ac_idx, ac in enumerate(all_ac)
     ]
 
     completed = 0
-    with multiprocessing.Pool(
-        processes=_N_CDO_WORKERS,
-        initializer=_pool_init,
-        initargs=(all_paths, weather),
-    ) as pool:
-        for result in pool.imap_unordered(_precompute_one_aircraft, args_list):
+    with ThreadPoolExecutor(max_workers=_N_CDO_WORKERS) as executor:
+        futures = {executor.submit(_precompute_one_aircraft, a): a[0] for a in args_list}
+        for fut in as_completed(futures):
             try:
-                ac_idx, u_dict, fuel_dict = result
-            except Exception as _e:
-                ac_idx = completed
+                ac_idx, u_dict, fuel_dict = fut.result()
+            except Exception:
+                ac_idx = futures[fut]
                 u_dict, fuel_dict = {}, {}
             u_table[ac_idx]    = u_dict
             fuel_table[ac_idx] = fuel_dict
