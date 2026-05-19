@@ -550,8 +550,9 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     path_node_time_sigma22   = _path_node_time_sigma(xi, s1, AC2)
 
     # ── Gurobi model (exact replication of run_scenario.py) ──
-    alpha = 0.1
-    omega = 3
+    alpha   = 0.1
+    n_ac_total = sum(len(AC[B[i]]) for i in range(len(B)))
+    omega   = n_ac_total  # big-M: must exceed max possible LHS sum (all ac in window)
     path_no = len(all_paths_links)
 
     model = gp.Model('TMAOpt')
