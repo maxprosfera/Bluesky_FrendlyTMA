@@ -79,10 +79,17 @@ _VD_DES     = [5.0, 10.0, 10.0, 10.0]   # [kt] speed deltas for bands 1-4
 _CDO_FAP_ALT_M   = 2500.0 * _FT_TO_M    # 762.0 m  — FAF/FAP for ESSA ILS RWY 01L (SSA DME 7.6)
 _CDO_END_ALT_M   = 0.0                   # ground level
 
-# Pre-spawned worker pool — created at module import time (before Qt starts)
-# so workers use fork-inherited state rather than spawning cold under the GUI.
+# Worker count for CDO parallelism
 _N_CDO_WORKERS = max(1, (os.cpu_count() or 4))
-_CDO_POOL = multiprocessing.Pool(processes=_N_CDO_WORKERS)
+
+# Worker-global shared state — set once per pool via initializer
+_W_ALL_PATHS = None
+_W_WEATHER   = None
+
+def _pool_init(all_paths, weather):
+    global _W_ALL_PATHS, _W_WEATHER
+    _W_ALL_PATHS = all_paths
+    _W_WEATHER   = weather
 
 # ESSA airport coordinates
 _ESSA_LAT = 59.6519
@@ -906,16 +913,19 @@ def _run_cdogenopt(pkl_arg: str):
 
 def _precompute_one_aircraft(args):
     """Top-level worker: compute u/fuel for one aircraft across all paths.
-    Must be a module-level function so ProcessPoolExecutor can pickle it.
+    all_paths and weather are taken from worker globals set by _pool_init.
     Returns (ac_idx, u_dict, fuel_dict).
     """
-    (ac_idx, ac, all_paths, ref_unix, mlw_factor, weather) = args
+    (ac_idx, ac, ref_unix, mlw_factor) = args
 
     import sys as _sys
     _REPO_ROOT_STR = str(_REPO_ROOT)
     if _REPO_ROOT_STR not in _sys.path:
         _sys.path.insert(0, _REPO_ROOT_STR)
     from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm
+
+    all_paths = _W_ALL_PATHS
+    weather   = _W_WEATHER
 
     cs       = ac.get('callsign', f'AC{ac_idx}')
     icao24   = ac.get('icao24', '')
@@ -1022,22 +1032,27 @@ def _run_cdoprecompute_inline(result: dict):
     from bluesky.plugins.tma_opt import _GRID_COORDS, _haversine_nm
 
     args_list = [
-        (ac_idx, ac, all_paths, ac.get('crossing_time') or ref_unix, mlw_factor, weather)
+        (ac_idx, ac, ac.get('crossing_time') or ref_unix, mlw_factor)
         for ac_idx, ac in enumerate(all_ac)
     ]
 
     completed = 0
-    for result in _CDO_POOL.imap_unordered(_precompute_one_aircraft, args_list):
-        try:
-            ac_idx, u_dict, fuel_dict = result
-        except Exception as _e:
-            ac_idx = completed
-            u_dict, fuel_dict = {}, {}
-        u_table[ac_idx]    = u_dict
-        fuel_table[ac_idx] = fuel_dict
-        completed += 1
-        if completed % 3 == 0 or completed == n_ac:
-            stack.stack(f'ECHO TMAOPT: CDO precompute — {completed}/{n_ac} done ...')
+    with multiprocessing.Pool(
+        processes=_N_CDO_WORKERS,
+        initializer=_pool_init,
+        initargs=(all_paths, weather),
+    ) as pool:
+        for result in pool.imap_unordered(_precompute_one_aircraft, args_list):
+            try:
+                ac_idx, u_dict, fuel_dict = result
+            except Exception as _e:
+                ac_idx = completed
+                u_dict, fuel_dict = {}, {}
+            u_table[ac_idx]    = u_dict
+            fuel_table[ac_idx] = fuel_dict
+            completed += 1
+            if completed % 3 == 0 or completed == n_ac:
+                stack.stack(f'ECHO TMAOPT: CDO precompute — {completed}/{n_ac} done ...')
 
     _restore_cdo_params(old_params)
     return u_table, fuel_table
