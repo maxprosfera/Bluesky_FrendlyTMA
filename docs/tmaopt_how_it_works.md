@@ -177,10 +177,9 @@ Backward sequence is flipped → forward CDO profile. Lat/lon interpolated along
 
 | Pair | Min separation |
 |------|---------------|
-| Heavy → Medium | s1 min |
-| Medium → Light | s2 min |
-| Heavy → Light  | s1 min |
-| Medium → Medium | s1 min |
+| Heavy/Medium → Heavy/Medium | s1 min |
+| Heavy/Medium → Light | s2 min |
+| Light → Light | s2 min |
 
 6. **Converging-edge mid-point separation:** node-level constraints cannot prevent two aircraft from physically crossing mid-edge when they approach the same node from different grid directions (H/V/D). For each such converging pair `(i1→j, i2→j)`, an additional set of big-M constraints is added:
 

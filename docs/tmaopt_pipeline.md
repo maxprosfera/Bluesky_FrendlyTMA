@@ -207,8 +207,8 @@ Minimises weighted tree edge length (infrastructure cost, 10%) plus traffic-weig
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `s1` | 2 min | Heavy–Medium and Heavy–Light separation |
-| `s2` | 3 min | Medium–Light separation |
+| `s1` | 2 min | Heavy/Medium–Heavy/Medium separation |
+| `s2` | 3 min | Heavy/Medium–Light and Light–Light separation |
 
 Heavy types include: B744, B748, B77W, B788, B789, A332, A333, A359, A388, A124, C5, AN12, and others.
 

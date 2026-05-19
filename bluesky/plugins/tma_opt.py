@@ -73,7 +73,7 @@ def _is_ga_icao24(icao24: str) -> bool:
 
 
 # ── ICAO wake turbulence categories ─────────────────────────────────────────
-# H = Heavy (s1 separation), M/L = Medium/Light (s2 separation)
+# H = Heavy/Medium (s1 separation), L = Light (s2 separation)
 _WAKE_HEAVY = {
     'A124','A225','A306','A30B','A310','A318','A319','A320','A321',
     'A332','A333','A338','A339','A342','A343','A345','A346',
@@ -387,10 +387,10 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
 
     ta1          = {}
     AC           = {b: [] for b in B}
-    AC1          = {b: [] for b in B}   # Heavy
-    AC2          = {b: [] for b in B}   # Medium/Light
+    AC1          = {b: [] for b in B}   # Heavy/Medium
+    AC2          = {b: [] for b in B}   # Light
     C1           = []                    # all Heavy ac ids
-    C2           = []                    # all Medium/Light ac ids
+    C2           = []                    # all Light ac ids
     A_used       = []
     callsign_map = {}
     u            = {}
@@ -466,7 +466,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     # ── Log wake category breakdown ──
     n_heavy  = len(C1)
     n_medium = len(C2)
-    stack.stack(f'ECHO TMAOPT: Wake categories — Heavy: {n_heavy}, Medium/Light: {n_medium}')
+    stack.stack(f'ECHO TMAOPT: Wake categories — Heavy/Medium: {n_heavy}, Light: {n_medium}')
 
     # ── Time horizon: span actual arrivals + small buffer ──
     all_arr = list(ta1.values())
