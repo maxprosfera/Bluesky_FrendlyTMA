@@ -635,57 +635,111 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         for i in range(len(B)) for a in AC[B[i]]
     )
 
-    # Wake turbulence separation (exact replication of run_scenario.py)
-    model.addConstrs(
-        gp.quicksum(
-            tau[a, k, ta1[j, a] + t1]
-            for j in B for a in AC1[j] for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_sigma21[a, i, t - t1] if (t - t1) <= T_end
-        ) <= omega * (1 - gp.quicksum(
-            tau[a, k, ta1[j, a] + t1]
-            for j in B for a in AC2[j] for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
-        ))
-        for i in NODES for t in range(T_start, T_end)
-    )
-    model.addConstrs(
-        gp.quicksum(
-            tau[a, k, ta1[j, a] + t1]
-            for j in B for a in AC2[j] for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_sigma12[a, i, t - t1] if (t - t1) <= T_end
-        ) <= omega * (1 - gp.quicksum(
-            tau[a, k, ta1[j, a] + t1]
-            for j in B for a in AC1[j] for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
-        ))
-        for i in NODES for t in range(T_start, T_end)
-    )
-    model.addConstrs(
-        gp.quicksum(
-            tau[a, k, ta1[j, a] + t1]
-            for j in B for a in AC1[j] if a != a1
-            for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_sigma11[a, i, t - t1] if (t - t1) <= T_end
-        ) <= omega * (1 - gp.quicksum(
-            tau[a1, k, ta1[j1, a1] + t1]
-            for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
-        ))
-        for j1 in B for a1 in AC1[j1] for i in NODES for t in range(T_start, T_end)
-    )
-    model.addConstrs(
-        gp.quicksum(
-            tau[a, k, ta1[j, a] + t1]
-            for j in B for a in AC2[j] if a != a1
-            for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_sigma22[a, i, t - t1] if (t - t1) <= T_end
-        ) <= omega * (1 - gp.quicksum(
-            tau[a1, k, ta1[j1, a1] + t1]
-            for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
-        ))
-        for j1 in B for a1 in AC2[j1] for i in NODES for t in range(T_start, T_end)
-    )
+    # Wake turbulence separation — only add constraints where both sides are non-empty
+    # Iterating all NODES×T with addConstrs generates ~150k zero-variable constraints.
+    # Pre-filter using the lookup tables to only touch (i,t) pairs with actual traffic.
+
+    # C1→C2 separation
+    for i in NODES:
+        for t in range(T_start, T_end):
+            rhs_keys = [
+                (a, k, ta1[j, a] + t1)
+                for j in B for a in AC2[j]
+                for t1 in range(-epsilon, epsilon + 1)
+                for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
+            ]
+            if not rhs_keys:
+                continue
+            lhs_keys = [
+                (a, k, ta1[j, a] + t1)
+                for j in B for a in AC1[j]
+                for t1 in range(-epsilon, epsilon + 1)
+                for k in path_node_time_sigma21[a, i, t - t1] if (t - t1) <= T_end
+            ]
+            if not lhs_keys:
+                continue
+            model.addConstr(
+                gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
+                omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
+                name=f'sep_12_{i}_{t}'
+            )
+
+    # C2→C1 separation (AC2 sigma, AC1 xi)
+    for i in NODES:
+        for t in range(T_start, T_end):
+            rhs_keys = [
+                (a, k, ta1[j, a] + t1)
+                for j in B for a in AC1[j]
+                for t1 in range(-epsilon, epsilon + 1)
+                for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
+            ]
+            if not rhs_keys:
+                continue
+            lhs_keys = [
+                (a, k, ta1[j, a] + t1)
+                for j in B for a in AC2[j]
+                for t1 in range(-epsilon, epsilon + 1)
+                for k in path_node_time_sigma12[a, i, t - t1] if (t - t1) <= T_end
+            ]
+            if not lhs_keys:
+                continue
+            model.addConstr(
+                gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
+                omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
+                name=f'sep_21_{i}_{t}'
+            )
+
+    # C1→C1 separation (per a1)
+    for j1 in B:
+        for a1 in AC1[j1]:
+            for i in NODES:
+                for t in range(T_start, T_end):
+                    rhs_keys = [
+                        (a1, k, ta1[j1, a1] + t1)
+                        for t1 in range(-epsilon, epsilon + 1)
+                        for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
+                    ]
+                    if not rhs_keys:
+                        continue
+                    lhs_keys = [
+                        (a, k, ta1[j, a] + t1)
+                        for j in B for a in AC1[j] if a != a1
+                        for t1 in range(-epsilon, epsilon + 1)
+                        for k in path_node_time_sigma11[a, i, t - t1] if (t - t1) <= T_end
+                    ]
+                    if not lhs_keys:
+                        continue
+                    model.addConstr(
+                        gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
+                        omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
+                        name=f'sep_11_{a1}_{i}_{t}'
+                    )
+
+    # C2→C2 separation (per a1)
+    for j1 in B:
+        for a1 in AC2[j1]:
+            for i in NODES:
+                for t in range(T_start, T_end):
+                    rhs_keys = [
+                        (a1, k, ta1[j1, a1] + t1)
+                        for t1 in range(-epsilon, epsilon + 1)
+                        for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
+                    ]
+                    if not rhs_keys:
+                        continue
+                    lhs_keys = [
+                        (a, k, ta1[j, a] + t1)
+                        for j in B for a in AC2[j] if a != a1
+                        for t1 in range(-epsilon, epsilon + 1)
+                        for k in path_node_time_sigma22[a, i, t - t1] if (t - t1) <= T_end
+                    ]
+                    if not lhs_keys:
+                        continue
+                    model.addConstr(
+                        gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
+                        omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
+                        name=f'sep_22_{a1}_{i}_{t}'
+                    )
 
     # ── Converging-edge mid-point separation ─────────────────────────────────
     # For each node j with multiple incoming edges from different directions,
