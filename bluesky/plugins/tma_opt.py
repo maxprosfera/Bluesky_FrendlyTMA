@@ -645,114 +645,134 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     )
 
     # Wake turbulence separation — only add constraints where both sides are non-empty
-    # Restrict to ACTIVE_NODES: nodes actually visited by at least one aircraft path.
-    # With 165 nodes but typically only ~30-50 visited, this reduces constraint
-    # building by ~3-5x and shrinks the Gurobi model significantly.
-    ACTIVE_NODES = sorted({node for k_idx in range(len(all_paths))
-                           for node in all_paths[k_idx]})
-    stack.stack(f'ECHO TMAOPT: [timing] active_nodes={len(ACTIVE_NODES)}, building constraints at {_time.time()-_t0:.1f}s')
+    # Build ACTIVE_NODES only from paths actually assigned to current aircraft.
+    # Previously used all 3821 paths → 156/165 nodes → 3M constraints.
+    used_k = set()
+    for bi in range(len(B)):
+        for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
+            used_k.add(k)
+    ACTIVE_NODES = sorted({node for k in used_k for node in all_paths[k]})
 
-    # C1→C2 separation
-    for i in ACTIVE_NODES:
-        for t in range(T_start, T_end):
-            rhs_keys = [
-                (a, k, ta1[j, a] + t1)
-                for j in B for a in AC2[j]
-                for t1 in range(-epsilon, epsilon + 1)
-                for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
-            ]
-            if not rhs_keys:
-                continue
-            lhs_keys = [
-                (a, k, ta1[j, a] + t1)
-                for j in B for a in AC1[j]
-                for t1 in range(-epsilon, epsilon + 1)
-                for k in path_node_time_sigma21[a, i, t - t1] if (t - t1) <= T_end
-            ]
-            if not lhs_keys:
-                continue
-            model.addConstr(
-                gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
-                omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
-                name=f'sep_12_{i}_{t}'
-            )
+    # Pre-build active (node, t) index directly from xi — only (i,t) pairs where
+    # at least one aircraft actually arrives (with epsilon shift).
+    # This replaces the O(NODES × T_range) scan with O(actual_arrivals × epsilon).
+    active_it_c1 = set()
+    active_it_c2 = set()
+    for bi in range(len(B)):
+        for a in AC1[B[bi]]:
+            for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
+                for node in all_paths[k]:
+                    arr = xi.get((a, k, node))
+                    if arr is not None:
+                        for t1 in range(-epsilon, epsilon + 1):
+                            active_it_c1.add((node, arr + t1))
+        for a in AC2[B[bi]]:
+            for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
+                for node in all_paths[k]:
+                    arr = xi.get((a, k, node))
+                    if arr is not None:
+                        for t1 in range(-epsilon, epsilon + 1):
+                            active_it_c2.add((node, arr + t1))
 
-    # C2→C1 separation (AC2 sigma, AC1 xi)
-    for i in ACTIVE_NODES:
-        for t in range(T_start, T_end):
-            rhs_keys = [
-                (a, k, ta1[j, a] + t1)
-                for j in B for a in AC1[j]
-                for t1 in range(-epsilon, epsilon + 1)
-                for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
-            ]
-            if not rhs_keys:
-                continue
-            lhs_keys = [
-                (a, k, ta1[j, a] + t1)
-                for j in B for a in AC2[j]
-                for t1 in range(-epsilon, epsilon + 1)
-                for k in path_node_time_sigma12[a, i, t - t1] if (t - t1) <= T_end
-            ]
-            if not lhs_keys:
-                continue
-            model.addConstr(
-                gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
-                omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
-                name=f'sep_21_{i}_{t}'
-            )
+    stack.stack(f'ECHO TMAOPT: [timing] active_nodes={len(ACTIVE_NODES)}, active_it c1={len(active_it_c1)} c2={len(active_it_c2)}, building constraints at {_time.time()-_t0:.1f}s')
 
-    # C1→C1 separation (per a1)
+    # C1→C2 separation — iterate only (i,t) pairs where AC2 actually arrives
+    for (i, t) in active_it_c2:
+        rhs_keys = [
+            (a, k, ta1[j, a] + t1)
+            for j in B for a in AC2[j]
+            for t1 in range(-epsilon, epsilon + 1)
+            for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
+        ]
+        if not rhs_keys:
+            continue
+        lhs_keys = [
+            (a, k, ta1[j, a] + t1)
+            for j in B for a in AC1[j]
+            for t1 in range(-epsilon, epsilon + 1)
+            for k in path_node_time_sigma21[a, i, t - t1] if (t - t1) <= T_end
+        ]
+        if not lhs_keys:
+            continue
+        model.addConstr(
+            gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
+            omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
+            name=f'sep_12_{i}_{t}'
+        )
+
+    # C2→C1 separation — iterate only (i,t) pairs where AC1 actually arrives
+    for (i, t) in active_it_c1:
+        rhs_keys = [
+            (a, k, ta1[j, a] + t1)
+            for j in B for a in AC1[j]
+            for t1 in range(-epsilon, epsilon + 1)
+            for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
+        ]
+        if not rhs_keys:
+            continue
+        lhs_keys = [
+            (a, k, ta1[j, a] + t1)
+            for j in B for a in AC2[j]
+            for t1 in range(-epsilon, epsilon + 1)
+            for k in path_node_time_sigma12[a, i, t - t1] if (t - t1) <= T_end
+        ]
+        if not lhs_keys:
+            continue
+        model.addConstr(
+            gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
+            omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
+            name=f'sep_21_{i}_{t}'
+        )
+
+    # C1→C1 separation — iterate only (i,t) pairs where any AC1 arrives
     for j1 in B:
         for a1 in AC1[j1]:
-            for i in ACTIVE_NODES:
-                for t in range(T_start, T_end):
-                    rhs_keys = [
-                        (a1, k, ta1[j1, a1] + t1)
-                        for t1 in range(-epsilon, epsilon + 1)
-                        for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
-                    ]
-                    if not rhs_keys:
-                        continue
-                    lhs_keys = [
-                        (a, k, ta1[j, a] + t1)
-                        for j in B for a in AC1[j] if a != a1
-                        for t1 in range(-epsilon, epsilon + 1)
-                        for k in path_node_time_sigma11[a, i, t - t1] if (t - t1) <= T_end
-                    ]
-                    if not lhs_keys:
-                        continue
-                    model.addConstr(
-                        gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
-                        omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
-                        name=f'sep_11_{a1}_{i}_{t}'
-                    )
+            for (i, t) in active_it_c1:
+                rhs_keys = [
+                    (a1, k, ta1[j1, a1] + t1)
+                    for t1 in range(-epsilon, epsilon + 1)
+                    for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
+                ]
+                if not rhs_keys:
+                    continue
+                lhs_keys = [
+                    (a, k, ta1[j, a] + t1)
+                    for j in B for a in AC1[j] if a != a1
+                    for t1 in range(-epsilon, epsilon + 1)
+                    for k in path_node_time_sigma11[a, i, t - t1] if (t - t1) <= T_end
+                ]
+                if not lhs_keys:
+                    continue
+                model.addConstr(
+                    gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
+                    omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
+                    name=f'sep_11_{a1}_{i}_{t}'
+                )
 
-    # C2→C2 separation (per a1)
+    # C2→C2 separation — iterate only (i,t) pairs where any AC2 arrives
     for j1 in B:
         for a1 in AC2[j1]:
-            for i in ACTIVE_NODES:
-                for t in range(T_start, T_end):
-                    rhs_keys = [
-                        (a1, k, ta1[j1, a1] + t1)
-                        for t1 in range(-epsilon, epsilon + 1)
-                        for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
-                    ]
-                    if not rhs_keys:
-                        continue
-                    lhs_keys = [
-                        (a, k, ta1[j, a] + t1)
-                        for j in B for a in AC2[j] if a != a1
-                        for t1 in range(-epsilon, epsilon + 1)
-                        for k in path_node_time_sigma22[a, i, t - t1] if (t - t1) <= T_end
-                    ]
-                    if not lhs_keys:
-                        continue
-                    model.addConstr(
-                        gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
-                        omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
-                        name=f'sep_22_{a1}_{i}_{t}'
-                    )
+            for (i, t) in active_it_c2:
+                rhs_keys = [
+                    (a1, k, ta1[j1, a1] + t1)
+                    for t1 in range(-epsilon, epsilon + 1)
+                    for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
+                ]
+                if not rhs_keys:
+                    continue
+                lhs_keys = [
+                    (a, k, ta1[j, a] + t1)
+                    for j in B for a in AC2[j] if a != a1
+                    for t1 in range(-epsilon, epsilon + 1)
+                    for k in path_node_time_sigma22[a, i, t - t1] if (t - t1) <= T_end
+                ]
+                if not lhs_keys:
+                    continue
+                model.addConstr(
+                    gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
+                    omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
+                    name=f'sep_22_{a1}_{i}_{t}'
+                )
 
     # ── Converging-edge mid-point separation ─────────────────────────────────
     # For each node j with multiple incoming edges from different directions,
