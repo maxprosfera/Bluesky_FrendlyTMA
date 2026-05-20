@@ -542,11 +542,14 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         return pnt
 
     xi = _find_trajectories(u)
+    stack.stack(f'ECHO TMAOPT: [timing] xi built in {_time.time()-_t0:.1f}s')
     path_node_time, path_node_time_Xi = _path_node_time_exact(xi)
+    stack.stack(f'ECHO TMAOPT: [timing] exact lookup in {_time.time()-_t0:.1f}s')
     path_node_time_sigma12   = _path_node_time_sigma(xi, s2, AC2)
     path_node_time_sigma21   = _path_node_time_sigma(xi, s1, AC1)
     path_node_time_sigma11   = path_node_time_sigma21
     path_node_time_sigma21_2 = _path_node_time_sigma(xi, s2, AC1)
+    stack.stack(f'ECHO TMAOPT: [timing] sigma lookups in {_time.time()-_t0:.1f}s')
     path_node_time_sigma22   = _path_node_time_sigma(xi, s1, AC2)
 
     # ── Gurobi model (exact replication of run_scenario.py) ──
@@ -554,6 +557,9 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     n_ac_total = sum(len(AC[B[i]]) for i in range(len(B)))
     omega   = n_ac_total  # big-M: must exceed max possible LHS sum (all ac in window)
     path_no = len(all_paths_links)
+
+    import time as _time
+    _t0 = _time.time()
 
     model = gp.Model('TMAOpt')
     model.setParam('OutputFlag', 0)
@@ -644,6 +650,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     # building by ~3-5x and shrinks the Gurobi model significantly.
     ACTIVE_NODES = sorted({node for k_idx in range(len(all_paths))
                            for node in all_paths[k_idx]})
+    stack.stack(f'ECHO TMAOPT: [timing] active_nodes={len(ACTIVE_NODES)}, building constraints at {_time.time()-_t0:.1f}s')
 
     # C1→C2 separation
     for i in ACTIVE_NODES:
@@ -850,8 +857,10 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
                             )
 
     model.update()
+    stack.stack(f'ECHO TMAOPT: [timing] model has {model.NumVars} vars, {model.NumConstrs} constrs, built in {_time.time()-_t0:.1f}s')
     stack.stack('ECHO TMAOPT: Solving Gurobi model ...')
     model.optimize()
+    stack.stack(f'ECHO TMAOPT: [timing] optimize done in {_time.time()-_t0:.1f}s total')
 
     feasible = model.status in (gp.GRB.OPTIMAL, gp.GRB.SUBOPTIMAL) or model.SolCount > 0
 
