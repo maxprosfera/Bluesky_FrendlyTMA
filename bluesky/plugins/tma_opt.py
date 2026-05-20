@@ -374,6 +374,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     # s1, s2 come from caller (dialog parameters)
 
     import time as _time
+    _t0 = _time.time()
 
     # ── Map B node → direction string ──
     _node_to_dir = {9: 'N', 45: 'W', 66: 'E', 160: 'S'}
@@ -559,8 +560,6 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     n_ac_total = sum(len(AC[B[i]]) for i in range(len(B)))
     omega   = n_ac_total  # big-M: must exceed max possible LHS sum (all ac in window)
     path_no = len(all_paths_links)
-
-    _t0 = _time.time()
 
     model = gp.Model('TMAOpt')
     model.setParam('OutputFlag', 0)
