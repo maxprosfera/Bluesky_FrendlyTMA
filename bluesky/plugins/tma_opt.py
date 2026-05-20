@@ -546,14 +546,8 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
 
     xi = _find_trajectories(u)
     stack.stack(f'ECHO TMAOPT: [timing] xi built in {_time.time()-_t0:.1f}s')
-    path_node_time, path_node_time_Xi = _path_node_time_exact(xi)
-    stack.stack(f'ECHO TMAOPT: [timing] exact lookup in {_time.time()-_t0:.1f}s')
-    path_node_time_sigma12   = _path_node_time_sigma(xi, s2, AC2)
-    path_node_time_sigma21   = _path_node_time_sigma(xi, s1, AC1)
-    path_node_time_sigma11   = path_node_time_sigma21
-    path_node_time_sigma21_2 = _path_node_time_sigma(xi, s2, AC1)
-    stack.stack(f'ECHO TMAOPT: [timing] sigma lookups in {_time.time()-_t0:.1f}s')
-    path_node_time_sigma22   = _path_node_time_sigma(xi, s1, AC2)
+
+    stack.stack(f'ECHO TMAOPT: [timing] building pairwise constraints at {_time.time()-_t0:.1f}s')
 
     # ── Gurobi model (exact replication of run_scenario.py) ──
     alpha   = 0.1
@@ -645,134 +639,68 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     )
 
     # Wake turbulence separation — only add constraints where both sides are non-empty
-    # Build ACTIVE_NODES only from paths actually assigned to current aircraft.
-    # Previously used all 3821 paths → 156/165 nodes → 3M constraints.
-    used_k = set()
-    for bi in range(len(B)):
-        for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
-            used_k.add(k)
-    ACTIVE_NODES = sorted({node for k in used_k for node in all_paths[k]})
+    # ── Pairwise wake-turbulence separation ──────────────────────────────────
+    # Instead of big-M constraints over all (node, t) pairs (which produces
+    # millions of constraints), use direct pairwise binary exclusion:
+    #   tau[a1,k1,t1] + tau[a2,k2,t2] <= 1
+    # whenever aircraft a1 on path k1 with entry shift t1 and aircraft a2 on
+    # path k2 with entry shift t2 would be within sep_min minutes at some node.
+    #
+    # For each aircraft pair (a1, a2), for each node they both visit, check
+    # if |arrival_a1(k1,t1) - arrival_a2(k2,t2)| < sep_min for any (k1,t1,k2,t2).
+    # This generates O(pairs × paths² × epsilon²) simple 2-var constraints.
 
-    # Pre-build active (node, t) index directly from xi — only (i,t) pairs where
-    # at least one aircraft actually arrives (with epsilon shift).
-    # This replaces the O(NODES × T_range) scan with O(actual_arrivals × epsilon).
-    active_it_c1 = set()
-    active_it_c2 = set()
+    def _sep_min(a1, a2):
+        c1 = a1 in set(sum(AC1.values(), []))
+        c2 = a2 in set(sum(AC1.values(), []))
+        if c1 and c2:   return s1  # H/M vs H/M
+        if c1 or c2:    return s2  # H/M vs Light
+        return s2                  # Light vs Light
+
+    # Build per-aircraft lookup: node → list of (k, base_arr)
+    # base_arr = xi[a,k,node] (without epsilon shift)
+    ac_node_arrivals = {}
     for bi in range(len(B)):
-        for a in AC1[B[bi]]:
+        for a in AC[B[bi]]:
+            node_map = {}
             for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
                 for node in all_paths[k]:
                     arr = xi.get((a, k, node))
                     if arr is not None:
+                        node_map.setdefault(node, []).append((k, arr))
+            ac_node_arrivals[a] = node_map
+
+    all_ac_ids = [a for bi in range(len(B)) for a in AC[B[bi]]]
+    base_t = {a: ta1[B[bi], a]
+              for bi in range(len(B)) for a in AC[B[bi]]}
+
+    n_sep_constrs = 0
+    for idx1 in range(len(all_ac_ids)):
+        a1 = all_ac_ids[idx1]
+        for idx2 in range(idx1 + 1, len(all_ac_ids)):
+            a2 = all_ac_ids[idx2]
+            sep = _sep_min(a1, a2)
+            # Find nodes visited by both aircraft
+            common_nodes = ac_node_arrivals[a1].keys() & ac_node_arrivals[a2].keys()
+            for node in common_nodes:
+                for (k1, arr1) in ac_node_arrivals[a1][node]:
+                    for (k2, arr2) in ac_node_arrivals[a2][node]:
                         for t1 in range(-epsilon, epsilon + 1):
-                            active_it_c1.add((node, arr + t1))
-        for a in AC2[B[bi]]:
-            for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
-                for node in all_paths[k]:
-                    arr = xi.get((a, k, node))
-                    if arr is not None:
-                        for t1 in range(-epsilon, epsilon + 1):
-                            active_it_c2.add((node, arr + t1))
+                            for t2 in range(-epsilon, epsilon + 1):
+                                if abs((arr1 + t1) - (arr2 + t2)) < sep:
+                                    tv1 = base_t[a1] + t1
+                                    tv2 = base_t[a2] + t2
+                                    v1 = tau.get((a1, k1, tv1))
+                                    v2 = tau.get((a2, k2, tv2))
+                                    if v1 is not None and v2 is not None:
+                                        model.addConstr(
+                                            v1 + v2 <= 1,
+                                            name=f'sep_{a1}_{a2}_{node}_{k1}_{k2}_{t1}_{t2}'
+                                        )
+                                        n_sep_constrs += 1
 
-    stack.stack(f'ECHO TMAOPT: [timing] active_nodes={len(ACTIVE_NODES)}, active_it c1={len(active_it_c1)} c2={len(active_it_c2)}, building constraints at {_time.time()-_t0:.1f}s')
+    stack.stack(f'ECHO TMAOPT: [timing] pairwise sep constrs={n_sep_constrs}, built in {_time.time()-_t0:.1f}s')
 
-    # C1→C2 separation — iterate only (i,t) pairs where AC2 actually arrives
-    for (i, t) in active_it_c2:
-        rhs_keys = [
-            (a, k, ta1[j, a] + t1)
-            for j in B for a in AC2[j]
-            for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
-        ]
-        if not rhs_keys:
-            continue
-        lhs_keys = [
-            (a, k, ta1[j, a] + t1)
-            for j in B for a in AC1[j]
-            for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_sigma21[a, i, t - t1] if (t - t1) <= T_end
-        ]
-        if not lhs_keys:
-            continue
-        model.addConstr(
-            gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
-            omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
-            name=f'sep_12_{i}_{t}'
-        )
-
-    # C2→C1 separation — iterate only (i,t) pairs where AC1 actually arrives
-    for (i, t) in active_it_c1:
-        rhs_keys = [
-            (a, k, ta1[j, a] + t1)
-            for j in B for a in AC1[j]
-            for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_Xi[a, i, t - t1] if (t - t1) <= T_end
-        ]
-        if not rhs_keys:
-            continue
-        lhs_keys = [
-            (a, k, ta1[j, a] + t1)
-            for j in B for a in AC2[j]
-            for t1 in range(-epsilon, epsilon + 1)
-            for k in path_node_time_sigma12[a, i, t - t1] if (t - t1) <= T_end
-        ]
-        if not lhs_keys:
-            continue
-        model.addConstr(
-            gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
-            omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
-            name=f'sep_21_{i}_{t}'
-        )
-
-    # C1→C1 separation — iterate only (i,t) pairs where any AC1 arrives
-    for j1 in B:
-        for a1 in AC1[j1]:
-            for (i, t) in active_it_c1:
-                rhs_keys = [
-                    (a1, k, ta1[j1, a1] + t1)
-                    for t1 in range(-epsilon, epsilon + 1)
-                    for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
-                ]
-                if not rhs_keys:
-                    continue
-                lhs_keys = [
-                    (a, k, ta1[j, a] + t1)
-                    for j in B for a in AC1[j] if a != a1
-                    for t1 in range(-epsilon, epsilon + 1)
-                    for k in path_node_time_sigma11[a, i, t - t1] if (t - t1) <= T_end
-                ]
-                if not lhs_keys:
-                    continue
-                model.addConstr(
-                    gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
-                    omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
-                    name=f'sep_11_{a1}_{i}_{t}'
-                )
-
-    # C2→C2 separation — iterate only (i,t) pairs where any AC2 arrives
-    for j1 in B:
-        for a1 in AC2[j1]:
-            for (i, t) in active_it_c2:
-                rhs_keys = [
-                    (a1, k, ta1[j1, a1] + t1)
-                    for t1 in range(-epsilon, epsilon + 1)
-                    for k in path_node_time_Xi[a1, i, t - t1] if (t - t1) <= T_end
-                ]
-                if not rhs_keys:
-                    continue
-                lhs_keys = [
-                    (a, k, ta1[j, a] + t1)
-                    for j in B for a in AC2[j] if a != a1
-                    for t1 in range(-epsilon, epsilon + 1)
-                    for k in path_node_time_sigma22[a, i, t - t1] if (t - t1) <= T_end
-                ]
-                if not lhs_keys:
-                    continue
-                model.addConstr(
-                    gp.quicksum(tau[a, k, tv] for (a, k, tv) in lhs_keys) <=
-                    omega * (1 - gp.quicksum(tau[a, k, tv] for (a, k, tv) in rhs_keys)),
-                    name=f'sep_22_{a1}_{i}_{t}'
-                )
 
     # ── Converging-edge mid-point separation ─────────────────────────────────
     # For each node j with multiple incoming edges from different directions,
