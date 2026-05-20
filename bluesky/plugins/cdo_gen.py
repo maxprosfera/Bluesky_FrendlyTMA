@@ -806,6 +806,12 @@ def _run_cdogenopt(pkl_arg: str):
         ac_csv = out_dir / f'{stem}_cdo_{cs}.csv'
         _save_cdo_csv(ac_csv, cdo_pts)
 
+        try:
+            from bluesky.plugins.cdo_plots import generate_cdo_figures
+            generate_cdo_figures(cdo_pts, cs, actype, out_dir, stem)
+        except Exception:
+            pass
+
         all_cdo_rows.extend(cdo_pts)
         summary.append({
             'callsign':        cs,
@@ -1155,6 +1161,12 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path, stem_override: str = None
 
         ac_csv = out_dir / f'{stem}_cdo_{cs}.csv'
         _save_cdo_csv(ac_csv, cdo_pts)
+
+        try:
+            from bluesky.plugins.cdo_plots import generate_cdo_figures
+            generate_cdo_figures(cdo_pts, cs, actype, out_dir, stem)
+        except Exception:
+            pass
 
         all_cdo_rows.extend(cdo_pts)
         summary.append({
