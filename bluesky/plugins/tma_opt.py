@@ -558,10 +558,12 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     model = gp.Model('TMAOpt')
     model.setParam('OutputFlag', 0)
     model.setParam('TimeLimit', time_limit)
-    model.setParam('Threads', min(8, os.cpu_count() or 4))
+    model.setParam('Threads', 0)          # 0 = use all available cores
     model.setParam('MIPGap', 0.01)
     model.setParam('MIPFocus', 1)
-    model.setParam('Heuristics', 0.3)
+    model.setParam('Heuristics', 0.5)     # more aggressive heuristics for faster feasible solution
+    model.setParam('Cuts', 2)             # aggressive cuts
+    model.setParam('Presolve', 2)         # aggressive presolve
 
     rho   = model.addVars(range(path_no), vtype=GRB.BINARY)
     X_new = model.addVars(LINKS, vtype=GRB.BINARY)
@@ -637,11 +639,14 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     )
 
     # Wake turbulence separation — only add constraints where both sides are non-empty
-    # Iterating all NODES×T with addConstrs generates ~150k zero-variable constraints.
-    # Pre-filter using the lookup tables to only touch (i,t) pairs with actual traffic.
+    # Restrict to ACTIVE_NODES: nodes actually visited by at least one aircraft path.
+    # With 165 nodes but typically only ~30-50 visited, this reduces constraint
+    # building by ~3-5x and shrinks the Gurobi model significantly.
+    ACTIVE_NODES = sorted({node for k_idx in range(len(all_paths))
+                           for node in all_paths[k_idx]})
 
     # C1→C2 separation
-    for i in NODES:
+    for i in ACTIVE_NODES:
         for t in range(T_start, T_end):
             rhs_keys = [
                 (a, k, ta1[j, a] + t1)
@@ -666,7 +671,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
             )
 
     # C2→C1 separation (AC2 sigma, AC1 xi)
-    for i in NODES:
+    for i in ACTIVE_NODES:
         for t in range(T_start, T_end):
             rhs_keys = [
                 (a, k, ta1[j, a] + t1)
@@ -693,7 +698,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     # C1→C1 separation (per a1)
     for j1 in B:
         for a1 in AC1[j1]:
-            for i in NODES:
+            for i in ACTIVE_NODES:
                 for t in range(T_start, T_end):
                     rhs_keys = [
                         (a1, k, ta1[j1, a1] + t1)
@@ -719,7 +724,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     # C2→C2 separation (per a1)
     for j1 in B:
         for a1 in AC2[j1]:
-            for i in NODES:
+            for i in ACTIVE_NODES:
                 for t in range(T_start, T_end):
                     rhs_keys = [
                         (a1, k, ta1[j1, a1] + t1)
