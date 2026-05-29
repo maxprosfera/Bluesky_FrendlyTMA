@@ -104,6 +104,10 @@ _BADA_MAP = {
     'PC24': 'EMB-505',    'PC12': 'ATR42-300',
     'SB20': 'ATR72-200',  'SF34': 'ATR42-300',
     'SU95': 'EMB-175STD', 'G550': 'EMB-505', 'G650': 'EMB-505',
+    'B190': 'ATR42-300',  'BE20': 'ATR42-300', 'BE9L': 'ATR42-300',
+    'JS41': 'ATR42-300',  'JS32': 'ATR42-300',
+    'SW4':  'ATR42-300',  'C208': 'ATR42-300',
+    'F50':  'ATR72-200',  'F27':  'ATR72-200',
 }
 
 # ICAO type prefixes / exact types that are piston/helicopter/ultralight —

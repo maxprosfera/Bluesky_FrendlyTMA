@@ -57,6 +57,7 @@ from bluesky.plugins.fuel_calc import (
 
 _REPO_ROOT    = Path(__file__).parents[2]
 _SCENARIO_DIR = _REPO_ROOT / 'scenario' / 'OpenSky'
+_TMAOPT_DIR   = _REPO_ROOT / 'scenario' / 'TMAOpt'
 
 # ---------------------------------------------------------------------------
 # Physical / CDO constants
@@ -117,18 +118,32 @@ def cdogen(csv_path: 'txt' = ''):
         t.start()
         return
 
-    # --- CSV mode (original behaviour) ---
+    # --- CSV mode (original behaviour + TMAOpt auto-detection) ---
     if not csv_path or len(parts) != 1:
         scenname = stack.get_scenname()
         if scenname:
-            stem = Path(scenname).stem.replace('_cdo', '').replace('_tracks', '')
-            candidate = _SCENARIO_DIR / f'{stem}_tracks.csv'
-            if candidate.is_file():
-                csv_path = str(candidate)
+            stem = Path(scenname).stem
+            # Strip known suffixes to get the base stem
+            for suffix in ('_cdo_opt', '_cdo', '_tracks', '_historical'):
+                if stem.endswith(suffix):
+                    stem = stem[:-len(suffix)]
+                    break
+
+            # 1. TMAOpt directory: scenario/TMAOpt/<stem>/<stem>_historical.csv
+            tmaopt_subdir = _TMAOPT_DIR / stem
+            tmaopt_hist   = tmaopt_subdir / f'{stem}_historical.csv'
+            if tmaopt_hist.is_file():
+                csv_path = str(tmaopt_hist)
+            else:
+                # 2. OpenSky: scenario/OpenSky/<stem>_tracks.csv
+                candidate = _SCENARIO_DIR / f'{stem}_tracks.csv'
+                if candidate.is_file():
+                    csv_path = str(candidate)
+
         if not csv_path:
             csv_path = _auto_detect_csv()
     if not csv_path:
-        stack.stack('ECHO CDOGEN: No *_tracks.csv found in scenario/OpenSky/')
+        stack.stack('ECHO CDOGEN: No tracks CSV found. Open a scenario first or pass a path.')
         return
     stack.stack(f'ECHO CDOGEN: Starting for {Path(csv_path).name} ...')
     t = threading.Thread(target=_run_cdo, args=(csv_path,), daemon=True)
@@ -171,7 +186,18 @@ def cdogenopt(result_pkl: 'txt' = ''):
 
 def _run_cdo(csv_path: str):
     csv_path = Path(csv_path)
-    stem     = csv_path.stem.replace('_tracks', '')
+    stem     = csv_path.stem
+    for suffix in ('_historical', '_tracks'):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+
+    # Determine output directory: TMAOpt subdir or OpenSky
+    tmaopt_subdir = _TMAOPT_DIR / stem
+    if tmaopt_subdir.is_dir():
+        out_dir = tmaopt_subdir
+    else:
+        out_dir = _SCENARIO_DIR
 
     try:
         rows = _read_tracks_csv(csv_path)
@@ -228,7 +254,11 @@ def _run_cdo(csv_path: str):
             continue
 
         if not cdo_pts:
-            errors.append(f'{cs}: CDO produced no points.')
+            eng = bada.get('engine_type', '?')
+            if eng.upper() not in ('JET', 'TURBOFAN'):
+                errors.append(f'{cs}: CDO skipped — unsupported engine type {eng}')
+            else:
+                errors.append(f'{cs}: CDO produced no points.')
             continue
 
         cdo_fuel = cdo_pts[-1]['cum_fuel_kg']
@@ -264,9 +294,9 @@ def _run_cdo(csv_path: str):
             stack.stack(f"ECHO WARN: {err}")
         return
 
-    out_path     = _SCENARIO_DIR / f'{stem}_cdo.csv'
-    summary_path = _SCENARIO_DIR / f'{stem}_cdo_summary.csv'
-    scn_path     = _SCENARIO_DIR / f'{stem}_cdo.scn'
+    out_path     = out_dir / f'{stem}_cdo.csv'
+    summary_path = out_dir / f'{stem}_cdo_summary.csv'
+    scn_path     = out_dir / f'{stem}_cdo.scn'
     _save_cdo_csv(out_path, cdo_rows_all)
     _save_summary_csv(summary_path, summary)
     _save_scn(scn_path, stem, out_path)
@@ -322,6 +352,7 @@ def _run_merge_scn(stem: str):
         'icao24', 'callsign', 'est_departure', 'est_arrival',
         'time', 'lat', 'lon', 'baro_alt_m', 'true_track',
         'on_ground', 'velocity_ms', 'vertical_rate_ms', 'cas_ms',
+        'mach', 'fuel_flow_kg_s', 'cum_fuel_kg', 'cum_dist_nm',
     ]
 
     all_rows   = []
@@ -808,7 +839,15 @@ def _run_cdogenopt(pkl_arg: str):
 
         try:
             from bluesky.plugins.cdo_plots import generate_cdo_figures
-            generate_cdo_figures(cdo_pts, cs, actype, out_dir, stem)
+            orig_rows = [
+                {'time': wp.time, 'lat': wp.lat, 'lon': wp.lon,
+                 'baro_alt_m': wp.baro_alt_m, 'true_track': wp.true_track or 0.0,
+                 'velocity_ms': wp.velocity_ms or 0.0, 'vertical_rate_ms': wp.vertical_rate_ms or 0.0,
+                 'cas_ms': 0.0, 'mach': 0.0, 'fuel_flow_kg_s': 0.0}
+                for wp in track_waypoints.get(cs, [])
+                if not wp.on_ground
+            ] or None
+            generate_cdo_figures(cdo_pts, cs, actype, out_dir, stem, orig_rows=orig_rows)
         except Exception:
             pass
 
@@ -1075,12 +1114,13 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path, stem_override: str = None
     """CDO on optimal routes, called inline from _run_tmaopt after Phase 2."""
     from datetime import datetime, timezone as _tz
 
-    ac_path      = result.get('ac_path', {})
-    ac_by_ent    = result.get('aircraft_by_entry', {})
-    ref_unix     = result.get('ref_unix', 0)
-    cdo_params   = result.get('cdo_params', {})
-    callsign_map = result.get('callsign_map', {})
-    stem         = stem_override if stem_override else out_dir.name
+    ac_path          = result.get('ac_path', {})
+    ac_by_ent        = result.get('aircraft_by_entry', {})
+    ref_unix         = result.get('ref_unix', 0)
+    cdo_params       = result.get('cdo_params', {})
+    callsign_map     = result.get('callsign_map', {})
+    track_waypoints  = result.get('track_waypoints', {})
+    stem             = stem_override if stem_override else out_dir.name
 
     if not ac_path:
         stack.stack('ECHO TMAOPT: CDOGENOPT — no ac_path in result, skipping.')
@@ -1164,7 +1204,15 @@ def _run_cdogenopt_inline(result: dict, out_dir: Path, stem_override: str = None
 
         try:
             from bluesky.plugins.cdo_plots import generate_cdo_figures
-            generate_cdo_figures(cdo_pts, cs, actype, out_dir, stem)
+            orig_rows = [
+                {'time': wp.time, 'lat': wp.lat, 'lon': wp.lon,
+                 'baro_alt_m': wp.baro_alt_m, 'true_track': wp.true_track or 0.0,
+                 'velocity_ms': wp.velocity_ms or 0.0, 'vertical_rate_ms': wp.vertical_rate_ms or 0.0,
+                 'cas_ms': 0.0, 'mach': 0.0, 'fuel_flow_kg_s': 0.0}
+                for wp in track_waypoints.get(cs, [])
+                if not wp.on_ground
+            ] or None
+            generate_cdo_figures(cdo_pts, cs, actype, out_dir, stem, orig_rows=orig_rows)
         except Exception:
             pass
 
@@ -1405,9 +1453,9 @@ def _run_cdo_trino(callsign: str, begin_ts: int, end_ts: int):
         pt['bada_model'] = bada_name
 
     stem         = f'cdo_{callsign}_{begin_ts}'
-    out_path     = _SCENARIO_DIR / f'{stem}_cdo.csv'
-    summary_path = _SCENARIO_DIR / f'{stem}_cdo_summary.csv'
-    scn_path     = _SCENARIO_DIR / f'{stem}_cdo.scn'
+    out_path     = out_dir / f'{stem}_cdo.csv'
+    summary_path = out_dir / f'{stem}_cdo_summary.csv'
+    scn_path     = out_dir / f'{stem}_cdo.scn'
 
     _save_cdo_csv(out_path, cdo_pts)
     _save_summary_csv(summary_path, [{
@@ -1673,6 +1721,10 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
     The horizontal path is kept identical to the observed track.
     Only the vertical profile (alt, ROCD, speed, fuel) is replaced.
     """
+    engine_type = bada.get('engine_type', 'JET').upper()
+    if engine_type not in ('JET', 'TURBOFAN'):
+        return []   # BADA 4.2 turboprop/piston model not supported — skip CDO
+
     S         = bada['S']
     CD_scalar = bada['CD_scalar']
     mass      = bada['mass']
@@ -1958,6 +2010,7 @@ def _save_cdo_csv(out_path: Path, rows: list):
         'icao24', 'callsign', 'est_departure', 'est_arrival',
         'time', 'lat', 'lon', 'baro_alt_m', 'true_track',
         'on_ground', 'velocity_ms', 'vertical_rate_ms', 'cas_ms',
+        'mach', 'fuel_flow_kg_s', 'cum_fuel_kg', 'cum_dist_nm',
     ]
     with open(out_path, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')

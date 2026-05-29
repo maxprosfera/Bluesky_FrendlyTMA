@@ -154,7 +154,7 @@ def init_plugin():
 @stack.command
 def tmaopt(dtstr: str = '', duration: int = 60, entries: str = 'NESW',
            max_ac: int = 15, max_ac_per_entry: int = 5,
-           max_eps: int = 3, time_limit_per_eps: int = 120,
+           max_eps: int = 3, time_limit_per_eps: int = 300,
            s1: int = 2, s2: int = 3, fetch_radius: int = 50,
            cdo_args: 'string' = ''):
     """[datetime] [duration_min] [entries] [max_ac] [max_ac_per_entry] [max_eps]
@@ -554,6 +554,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     n_ac_total = sum(len(AC[B[i]]) for i in range(len(B)))
     omega   = n_ac_total  # big-M: must exceed max possible LHS sum (all ac in window)
     path_no = len(all_paths_links)
+    total_path_links = sum(len(lks) for lks in all_paths_links.values())
 
     model = gp.Model('TMAOpt')
     model.setParam('OutputFlag', 0)
@@ -576,6 +577,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         for t in range(ta1[B[i], a] - epsilon, ta1[B[i], a] + epsilon + 1)
     ]
     tau = model.addVars(Indices, vtype=GRB.BINARY)
+    stack.stack(f'ECHO TMAOPT: [dbg] path_no={path_no} total_path_links={total_path_links} NODES={len(NODES)} LINKS={len(LINKS)} tau_indices={len(Indices)}')
 
     # Objective
     model.setObjective(
@@ -592,14 +594,18 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
     # Degree constraints
     model.addConstrs(rho[k] <= X_new[i, j]
                      for k in range(path_no) for (i, j) in all_paths_links[k])
+    stack.stack(f'ECHO TMAOPT: [timing] after rho<=X constrs={model.NumConstrs} at {_time.time()-_t0:.1f}s')
     model.addConstrs(gp.quicksum(X_new[i, k1] for (i, k1) in LINKS if k1 == k) <= 2
                      for k in NODES)
+    stack.stack(f'ECHO TMAOPT: [timing] after in-degree constrs={model.NumConstrs} at {_time.time()-_t0:.1f}s')
     model.addConstrs(gp.quicksum(X_new[i1, j] for (i1, j) in LINKS if i1 == i) <= 1
                      for i in NODES if i != N_exit)
+    stack.stack(f'ECHO TMAOPT: [timing] after out-degree constrs={model.NumConstrs} at {_time.time()-_t0:.1f}s')
     model.addConstrs(
         gp.quicksum(rho[k] for k in range(ent_i_paths_no[i], ent_i_paths_no[i + 1])) == 1
         for i in range(len(B)) if AC[B[i]]
     )
+    stack.stack(f'ECHO TMAOPT: [timing] after entry constrs={model.NumConstrs} at {_time.time()-_t0:.1f}s')
 
     # Crossing constraints (exact replication)
     model.addConstrs(
@@ -623,6 +629,7 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         (X_new[i+1+n, i] + X_new[i+n, i+1] + X_new[i+1, i+n]) <= 1
         for i in NODES_last if (i+n+1) in B
     )
+    stack.stack(f'ECHO TMAOPT: [timing] after crossing constrs={model.NumConstrs} at {_time.time()-_t0:.1f}s')
 
     # Flexible entry time constraints
     model.addConstrs(
@@ -631,12 +638,14 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         for i in range(len(B)) for a in AC[B[i]]
         for k in range(ent_i_paths_no[i], ent_i_paths_no[i + 1])
     )
+    stack.stack(f'ECHO TMAOPT: [timing] after tau==rho constrs={model.NumConstrs} at {_time.time()-_t0:.1f}s')
     model.addConstrs(
         gp.quicksum(tau[a, k, t]
                     for k in range(ent_i_paths_no[i], ent_i_paths_no[i + 1])
                     for t in range(ta1[B[i], a] - epsilon, ta1[B[i], a] + epsilon + 1)) == 1
         for i in range(len(B)) for a in AC[B[i]]
     )
+    stack.stack(f'ECHO TMAOPT: [timing] after tau==1 constrs={model.NumConstrs} at {_time.time()-_t0:.1f}s')
 
     # Wake turbulence separation — only add constraints where both sides are non-empty
     # ── Pairwise wake-turbulence separation ──────────────────────────────────
@@ -657,9 +666,11 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         if c1 or c2:    return s2  # H/M vs Light
         return s2                  # Light vs Light
 
-    # Build per-aircraft lookup: node → list of (k, base_arr)
-    # base_arr = xi[a,k,node] (without epsilon shift)
-    ac_node_arrivals = {}
+    # Build per-aircraft lookup: node → arr_time → list of k
+    # Groups paths by their base arrival time at each node so we can
+    # iterate over (distinct_arrival_time) pairs instead of (path) pairs,
+    # reducing O(paths²) to O(distinct_arrivals²) per node.
+    ac_node_arr_groups = {}   # a -> node -> arr_time -> [k, ...]
     for bi in range(len(B)):
         for a in AC[B[bi]]:
             node_map = {}
@@ -667,8 +678,8 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
                 for node in all_paths[k]:
                     arr = xi.get((a, k, node))
                     if arr is not None:
-                        node_map.setdefault(node, []).append((k, arr))
-            ac_node_arrivals[a] = node_map
+                        node_map.setdefault(node, {}).setdefault(arr, []).append(k)
+            ac_node_arr_groups[a] = node_map
 
     all_ac_ids = [a for bi in range(len(B)) for a in AC[B[bi]]]
     base_t = {a: ta1[B[bi], a]
@@ -680,37 +691,40 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         for idx2 in range(idx1 + 1, len(all_ac_ids)):
             a2 = all_ac_ids[idx2]
             sep = _sep_min(a1, a2)
-            # Find nodes visited by both aircraft
-            common_nodes = ac_node_arrivals[a1].keys() & ac_node_arrivals[a2].keys()
+            common_nodes = ac_node_arr_groups[a1].keys() & ac_node_arr_groups[a2].keys()
             for node in common_nodes:
-                for (k1, arr1) in ac_node_arrivals[a1][node]:
-                    for (k2, arr2) in ac_node_arrivals[a2][node]:
-                        for t1 in range(-epsilon, epsilon + 1):
-                            for t2 in range(-epsilon, epsilon + 1):
-                                if abs((arr1 + t1) - (arr2 + t2)) < sep:
-                                    tv1 = base_t[a1] + t1
-                                    tv2 = base_t[a2] + t2
-                                    v1 = tau.get((a1, k1, tv1))
-                                    v2 = tau.get((a2, k2, tv2))
-                                    if v1 is not None and v2 is not None:
-                                        model.addConstr(
-                                            v1 + v2 <= 1,
-                                            name=f'sep_{a1}_{a2}_{node}_{k1}_{k2}_{t1}_{t2}'
-                                        )
-                                        n_sep_constrs += 1
+                grp1 = ac_node_arr_groups[a1][node]  # arr1 -> [k, ...]
+                grp2 = ac_node_arr_groups[a2][node]  # arr2 -> [k, ...]
+                for t1 in range(-epsilon, epsilon + 1):
+                    tv1 = base_t[a1] + t1
+                    for arr1, ks1 in grp1.items():
+                        vars1 = [tau.get((a1, k, tv1)) for k in ks1]
+                        vars1 = [v for v in vars1 if v is not None]
+                        if not vars1:
+                            continue
+                        for t2 in range(-epsilon, epsilon + 1):
+                            tv2 = base_t[a2] + t2
+                            for arr2, ks2 in grp2.items():
+                                if abs((arr1 + t1) - (arr2 + t2)) >= sep:
+                                    continue
+                                vars2 = [tau.get((a2, k, tv2)) for k in ks2]
+                                vars2 = [v for v in vars2 if v is not None]
+                                if not vars2:
+                                    continue
+                                lhs = gp.quicksum(vars1) + gp.quicksum(vars2)
+                                model.addConstr(
+                                    lhs <= 1,
+                                    name=f'sep_{a1}_{a2}_{node}_{t1}_{t2}_{arr1}_{arr2}'
+                                )
+                                n_sep_constrs += 1
 
     stack.stack(f'ECHO TMAOPT: [timing] pairwise sep constrs={n_sep_constrs}, built in {_time.time()-_t0:.1f}s')
 
 
     # ── Converging-edge mid-point separation ─────────────────────────────────
-    # For each node j with multiple incoming edges from different directions,
-    # two aircraft on those edges may physically cross mid-edge even if their
-    # node-arrival times differ by >= s1.
-    # mid_arrival(a,k,j,t1) = xi_mid[a,k,j] + t1  where t1 is the epsilon shift
-    # Constraint: for each (a1,k1,t1) x (a2,k2,t2) pair that would place both
-    # aircraft within s1 minutes of each other at the mid-edge point, forbid
-    # both tau variables being 1 simultaneously.
-    # Pattern mirrors the existing wake-turbulence constraints (lines above).
+    # Same grouped approach as pairwise separation: group (a,k) by mid-arrival
+    # time so we add one aggregate constraint per conflicting (mid_arr1+t1a,
+    # mid_arr2+t1b) time pair instead of one per (k1,k2) combination.
 
     def _edge_dir(src, dst):
         d = abs(src - dst)
@@ -718,11 +732,16 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
         if d == 11: return 'V'
         return 'D'
 
-    # Build converging pairs: (i1,j),(i2,j) with different directions
     from collections import defaultdict as _dd
     _incoming = _dd(list)
     for (i, j) in LINKS:
         _incoming[j].append(i)
+
+    # Only keep converging pairs where both edges actually appear in all_paths
+    _edge_set = set()
+    for path in all_paths:
+        for step in range(1, len(path)):
+            _edge_set.add((path[step - 1], path[step]))
 
     converging_pairs = []
     for j, srcs in _incoming.items():
@@ -730,10 +749,11 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
             for idx2 in range(idx1 + 1, len(srcs)):
                 i1, i2 = srcs[idx1], srcs[idx2]
                 if _edge_dir(i1, j) != _edge_dir(i2, j):
-                    converging_pairs.append((i1, i2, j))
+                    if (i1, j) in _edge_set and (i2, j) in _edge_set:
+                        converging_pairs.append((i1, i2, j))
 
     if converging_pairs:
-        # xi_mid[a,k,j] = base mid-edge arrival time (relative to ta1, no epsilon shift)
+        # xi_mid[a,k,j] = base mid-edge arrival time
         xi_mid = {}
         for bi in range(len(B)):
             for a in AC[B[bi]]:
@@ -747,10 +767,10 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
                         u_edge = u.get((a, pl, step_idx), s1)
                         xi_mid[a, k, node_j] = node_j_arr - round(u_edge / 2)
 
-        # For each converging pair, build per-edge aircraft sets: (a,k,bi)
+        # For each converging pair, build grouped lookup:
+        # edge_grp[side][a][mid_arr] = [k, ...]
         for (i1, i2, j) in converging_pairs:
-            ac_e1 = []  # (a, k, bi) using edge i1→j
-            ac_e2 = []  # (a, k, bi) using edge i2→j
+            grp = [{}, {}]  # grp[0]=edge i1->j, grp[1]=edge i2->j  a -> mid_arr -> [k]
             for bi in range(len(B)):
                 for a in AC[B[bi]]:
                     for k in range(ent_i_paths_no[bi], ent_i_paths_no[bi + 1]):
@@ -758,51 +778,46 @@ def _run_optimisation(aircraft_by_entry, now_unix, epsilon=2, time_limit_overrid
                         if j in path:
                             idx_j = path.index(j)
                             if idx_j > 0:
-                                if path[idx_j - 1] == i1:
-                                    ac_e1.append((a, k, bi))
-                                elif path[idx_j - 1] == i2:
-                                    ac_e2.append((a, k, bi))
+                                pred = path[idx_j - 1]
+                                side = 0 if pred == i1 else (1 if pred == i2 else -1)
+                                if side < 0:
+                                    continue
+                                mid = xi_mid.get((a, k, j))
+                                if mid is None:
+                                    continue
+                                grp[side].setdefault(a, {}).setdefault(mid, []).append(k)
 
-            if not ac_e1 or not ac_e2:
+            if not grp[0] or not grp[1]:
                 continue
 
-            # Constraint pattern (mirrors wake-turbulence):
-            # Only iterate over t values where a2 actually has an exact mid-arrival,
-            # then check if a1 has a mid-arrival in [t-s1+1, t]. This avoids
-            # scanning the full T_start..T_end range (which was O(T×pairs) = millions).
-            for (a1, k1, bi1) in ac_e1:
-                for (a2, k2, bi2) in ac_e2:
+            all_a1 = list(grp[0].keys())
+            all_a2 = list(grp[1].keys())
+            for a1 in all_a1:
+                base1 = base_t[a1]
+                for a2 in all_a2:
                     if a1 == a2:
                         continue
-                    base1 = ta1[B[bi1], a1]
-                    base2 = ta1[B[bi2], a2]
-                    # t values where a2 has an exact mid-arrival at node j
-                    t_mid2 = xi_mid.get((a2, k2, j))
-                    if t_mid2 is None:
-                        continue
-                    # t values where a1 mid-arrival in [t-s1+1, t] overlap with a2
-                    t_mid1 = xi_mid.get((a1, k1, j))
-                    if t_mid1 is None:
-                        continue
-                    # Only add constraint if mid-arrivals are within s1 for any epsilon shift
-                    # Actual mid-arrival with shift t1: t_mid + t1
-                    # Conflict if |(t_mid1+t1a) - (t_mid2+t1b)| < s1 for some t1a,t1b in [-eps,eps]
-                    # Min gap = |t_mid1 - t_mid2| - 2*epsilon
-                    if abs(t_mid1 - t_mid2) >= s1 + 2 * epsilon:
-                        continue
-                    # Add one constraint per conflicting (t1a, t1b) epsilon shift pair
+                    base2 = base_t[a2]
                     for t1a in range(-epsilon, epsilon + 1):
-                        for t1b in range(-epsilon, epsilon + 1):
-                            if abs((t_mid1 + t1a) - (t_mid2 + t1b)) >= s1:
+                        tv1 = base1 + t1a
+                        for mid1, ks1 in grp[0][a1].items():
+                            vars1 = [tau.get((a1, k, tv1)) for k in ks1]
+                            vars1 = [v for v in vars1 if v is not None]
+                            if not vars1:
                                 continue
-                            tau1 = tau.get((a1, k1, base1 + t1a))
-                            tau2 = tau.get((a2, k2, base2 + t1b))
-                            if tau1 is None or tau2 is None:
-                                continue
-                            model.addConstr(
-                                tau1 + tau2 <= 1,
-                                name=f'conv_{i1}_{i2}_{j}_{a1}_{a2}_{t1a}_{t1b}'
-                            )
+                            for t1b in range(-epsilon, epsilon + 1):
+                                tv2 = base2 + t1b
+                                for mid2, ks2 in grp[1][a2].items():
+                                    if abs((mid1 + t1a) - (mid2 + t1b)) >= s1:
+                                        continue
+                                    vars2 = [tau.get((a2, k, tv2)) for k in ks2]
+                                    vars2 = [v for v in vars2 if v is not None]
+                                    if not vars2:
+                                        continue
+                                    model.addConstr(
+                                        gp.quicksum(vars1) + gp.quicksum(vars2) <= 1,
+                                        name=f'conv_{i1}_{i2}_{j}_{a1}_{a2}_{t1a}_{t1b}_{mid1}_{mid2}'
+                                    )
 
     model.update()
     stack.stack(f'ECHO TMAOPT: [timing] model has {model.NumVars} vars, {model.NumConstrs} constrs, built in {_time.time()-_t0:.1f}s')
@@ -1111,7 +1126,7 @@ def _save_historical_csv(out_dir, tracks, timestamp_str):
 
 # ── Main thread ───────────────────────────────────────────────────────────────
 def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
-                max_ac_per_entry=5, max_eps=3, time_limit_per_eps=120,
+                max_ac_per_entry=5, max_eps=3, time_limit_per_eps=300,
                 s1=2, s2=3, fetch_radius=50, cdo_params=None):
     now_unix = time.time()
 
@@ -1234,7 +1249,9 @@ def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
     result['cdo_params']        = cdo_params or {}
     result['aircraft_by_entry'] = aircraft_by_entry
     result['ref_unix']          = ref_unix
+    result['track_waypoints']   = track_waypoints
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / 'result.pkl', 'wb') as f:
         pickle.dump(result, f)
 
