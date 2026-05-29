@@ -1,28 +1,26 @@
 """CDO diagram generator — replicates the three Matlab figures from fuel_burn_v3.m.
 
-fig1  — 6×2 subplot grid: Mach, TAS [kt], CAS [kt], Alt [FL],
-         ROD [ft/min], Fuel flow [kg/h]  vs  time-to-go [min] (left)
+fig1  — 7×2 subplot grid: Mach, GS [kt], TAS [kt], CAS [kt], Alt [FL],
+         Vertical speed [ft/min], Fuel flow [kg/h]  vs  time-to-go [min] (left)
          and distance-to-go [NM] (right).
-fig2  — 4×2 subplot grid: wind component, wind speed [kt],
+         Two lines: CDO (orange) and original flight (blue), matching Matlab style.
+fig2  — 4×2 subplot grid: wind component [-], wind speed [kt],
          wind direction [deg], flight track [deg]  vs  ttg / dtg.
-         (wind data from ERA5 if available, else omitted)
-fig3  — geographic map with TMA boundary, ESSA runways, entry points,
-         FAP/FAF markers, STAR outlines, and the CDO track.
-
-All figures are saved as PNG in a Figures/ sub-directory next to the CDO CSVs.
+         Two lines where original flight data is available.
+fig3  — geographic map with basemap tiles, TMA boundary, ESSA runways,
+         entry points, FAP markers, STAR outlines, CDO track, original track.
 """
 
 from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 _MS_TO_KT = 1.94384
 _M_TO_FT  = 3.28084
 _FT_TO_FL = 1.0 / 100.0
 
-# ── ESSA geographic constants (same as fuel_burn_v3.m) ─────────────────────
 _TMA_LAT = [
     59.0, 59.0, 59.5, 60.0, 60.5, 61.0, 61.0, 60.5,
     60.0, 59.5, 59.0, 59.0,
@@ -33,9 +31,9 @@ _TMA_LON = [
 ]
 
 _ESSA_RWY = [
-    ((59.6526, 17.9180), (59.5114, 17.9132)),  # 01L / 19R
-    ((59.6498, 17.9468), (59.5178, 17.9468)),  # 01R / 19L
-    ((59.6412, 17.9180), (59.6412, 17.9880)),  # 08 / 26
+    ((59.6526, 17.9180), (59.5114, 17.9132)),
+    ((59.6498, 17.9468), (59.5178, 17.9468)),
+    ((59.6412, 17.9180), (59.6412, 17.9880)),
 ]
 
 _ENTRY_POINTS = {
@@ -46,12 +44,12 @@ _ENTRY_POINTS = {
 }
 
 _FAP_POINTS = {
-    'FAP_01L': (59.5114, 17.9132),
-    'FAP_01R': (59.5178, 17.9468),
-    'FAP_19R': (59.6526, 17.9180),
-    'FAP_19L': (59.6498, 17.9468),
-    'FAP_26':  (59.6412, 17.9880),
-    'FAF_08':  (59.6412, 17.9180),
+    'FAP 01L': (59.5114, 17.9132),
+    'FAP 01R': (59.5178, 17.9468),
+    'FAP 19R': (59.6526, 17.9180),
+    'FAP 19L': (59.6498, 17.9468),
+    'FAP 26':  (59.6412, 17.9880),
+    'FAF 08':  (59.6412, 17.9180),
 }
 
 _STAR_ROUTES = {
@@ -63,19 +61,55 @@ _STAR_ROUTES = {
 
 
 def _ttg(times):
-    """Minutes to go (reversed so 0 = landing)."""
     t_arr = times[-1]
     return [(t_arr - t) / 60.0 for t in times]
 
 
-def _dtg(lats, lons):
-    """Cumulative distance to go in NM (reversed)."""
-    from bluesky.plugins.tma_opt import _haversine_nm
+def _dtg_from_rows(rows):
+    try:
+        from bluesky.plugins.tma_opt import _haversine_nm
+    except ImportError:
+        def _haversine_nm(a, b):
+            lat1, lon1 = math.radians(a[0]), math.radians(a[1])
+            lat2, lon2 = math.radians(b[0]), math.radians(b[1])
+            dlat, dlon = lat2 - lat1, lon2 - lon1
+            h = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+            return 2 * 3440.065 * math.asin(math.sqrt(h))
     cum = [0.0]
-    for i in range(1, len(lats)):
-        cum.append(cum[-1] + _haversine_nm((lats[i-1], lons[i-1]), (lats[i], lons[i])))
+    for i in range(1, len(rows)):
+        d = _haversine_nm(
+            (rows[i-1]['lat'], rows[i-1]['lon']),
+            (rows[i]['lat'],   rows[i]['lon'])
+        )
+        cum.append(cum[-1] + d)
     total = cum[-1]
     return [total - c for c in cum]
+
+
+def _extract(rows, key, scale=1.0, default=0.0):
+    return [float(r.get(key, default)) * scale for r in rows]
+
+
+def _resample_to_dtg(src_dtg, src_vals, tgt_dtg):
+    """Linear interpolation of src_vals (indexed by src_dtg) onto tgt_dtg grid."""
+    if not src_dtg or not tgt_dtg:
+        return [0.0] * len(tgt_dtg)
+    result = []
+    n = len(src_dtg)
+    for d in tgt_dtg:
+        if d >= src_dtg[0]:
+            result.append(src_vals[0])
+        elif d <= src_dtg[-1]:
+            result.append(src_vals[-1])
+        else:
+            for i in range(n - 1):
+                if src_dtg[i] >= d >= src_dtg[i + 1]:
+                    t = (src_dtg[i] - d) / (src_dtg[i] - src_dtg[i + 1]) if src_dtg[i] != src_dtg[i + 1] else 0.0
+                    result.append(src_vals[i] * (1 - t) + src_vals[i + 1] * t)
+                    break
+            else:
+                result.append(src_vals[-1])
+    return result
 
 
 def generate_cdo_figures(
@@ -84,24 +118,23 @@ def generate_cdo_figures(
     actype: str,
     out_dir: Path,
     stem: str,
-    weather_rows: List[Dict[str, Any]] | None = None,
+    orig_rows: Optional[List[Dict[str, Any]]] = None,
 ):
     """Generate fig1, fig2, fig3 PNG files for one aircraft CDO profile.
 
     Parameters
     ----------
-    rows        : list of row-dicts from _cdo_for_aircraft() (extended fields)
-    callsign    : aircraft callsign
-    actype      : ICAO type code
-    out_dir     : TMAOpt output directory (Figures/ sub-dir created here)
-    stem        : filename stem (e.g. 'tmaopt_20260507_132700')
-    weather_rows: optional list of ERA5 weather rows aligned to CDO rows
+    rows      : CDO profile rows from _cdo_for_aircraft()
+    callsign  : aircraft callsign
+    actype    : ICAO type code
+    out_dir   : TMAOpt output directory
+    stem      : filename stem
+    orig_rows : original (historical) flight rows for comparison (optional)
     """
     try:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        import matplotlib.gridspec as gridspec
     except ImportError:
         return
 
@@ -111,148 +144,200 @@ def generate_cdo_figures(
     fig_dir = out_dir / 'Figures'
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    times   = [r['time'] for r in rows]
-    lats    = [r['lat'] for r in rows]
-    lons    = [r['lon'] for r in rows]
-    alts_fl = [r['baro_alt_m'] * _M_TO_FT * _FT_TO_FL for r in rows]
-    rod     = [r.get('vertical_rate_ms', 0) * _M_TO_FT * 60.0 for r in rows]
-    tas_kt  = [r.get('velocity_ms', 0) * _MS_TO_KT for r in rows]
-    cas_kt  = [r.get('cas_ms', 0) * _MS_TO_KT for r in rows]
-    mach    = [r.get('mach', 0) for r in rows]
-    ff_kgh  = [r.get('fuel_flow_kg_s', 0) * 3600.0 for r in rows]
-    tracks  = [r.get('true_track', 0) for r in rows]
+    title = f'{callsign} — {actype} — ESSA CDO'
 
-    ttg = _ttg(times)
-    dtg = _dtg(lats, lons)
+    # ── CDO data ───────────────────────────────────────────────────────────
+    cdo_ttg  = _ttg(_extract(rows, 'time'))
+    cdo_dtg  = _dtg_from_rows(rows)
+    cdo_mach = _extract(rows, 'mach')
+    cdo_gs   = _extract(rows, 'velocity_ms', _MS_TO_KT)
+    cdo_tas  = _extract(rows, 'velocity_ms', _MS_TO_KT)
+    cdo_cas  = _extract(rows, 'cas_ms', _MS_TO_KT)
+    cdo_alt  = [r.get('baro_alt_m', 0) * _M_TO_FT * _FT_TO_FL for r in rows]
+    cdo_vs   = _extract(rows, 'vertical_rate_ms', _M_TO_FT * 60.0)
+    cdo_ff   = _extract(rows, 'fuel_flow_kg_s', 3600.0)
+    cdo_trk  = _extract(rows, 'true_track')
+    cdo_lats = _extract(rows, 'lat')
+    cdo_lons = _extract(rows, 'lon')
 
-    title = f'{callsign} — {actype} — ESSA 01L CDO'
+    # ── Original flight data (resampled to same dtg grid) ─────────────────
+    has_orig = bool(orig_rows and len(orig_rows) > 2)
+    if has_orig:
+        orig_dtg  = _dtg_from_rows(orig_rows)
+        orig_mach = _extract(orig_rows, 'mach')
+        orig_gs   = _extract(orig_rows, 'velocity_ms', _MS_TO_KT)
+        orig_tas  = _extract(orig_rows, 'velocity_ms', _MS_TO_KT)
+        orig_cas  = _extract(orig_rows, 'cas_ms', _MS_TO_KT)
+        orig_alt  = [r.get('baro_alt_m', 0) * _M_TO_FT * _FT_TO_FL for r in orig_rows]
+        orig_vs   = _extract(orig_rows, 'vertical_rate_ms', _M_TO_FT * 60.0)
+        orig_ff   = _extract(orig_rows, 'fuel_flow_kg_s', 3600.0)
+        orig_trk  = _extract(orig_rows, 'true_track')
+        orig_lats = _extract(orig_rows, 'lat')
+        orig_lons = _extract(orig_rows, 'lon')
+        orig_ttg  = _ttg(_extract(orig_rows, 'time'))
+    else:
+        orig_dtg = orig_ttg = []
 
-    # ── Figure 1: flight performance profile ───────────────────────────────
-    fig1, axes = plt.subplots(6, 2, figsize=(14, 20))
+    # ── Figure 1: flight performance ───────────────────────────────────────
+    fig1, axes = plt.subplots(7, 2, figsize=(14, 22))
     fig1.suptitle(title, fontsize=13, fontweight='bold')
 
-    _pairs = [
-        (mach,   'M [-]'),
-        (tas_kt, 'TAS [kt]'),
-        (cas_kt, 'CAS [kt]'),
-        (alts_fl,'Alt [FL]'),
-        (rod,    'ROD [ft/min]'),
-        (ff_kgh, 'Fuel flow [kg/h]'),
+    _perf = [
+        (cdo_mach, orig_mach if has_orig else None, 'M [-]'),
+        (cdo_gs,   orig_gs   if has_orig else None, 'GS [kt]'),
+        (cdo_tas,  orig_tas  if has_orig else None, 'TAS [kt]'),
+        (cdo_cas,  orig_cas  if has_orig else None, 'CAS [kt]'),
+        (cdo_alt,  orig_alt  if has_orig else None, 'Alt [FL]'),
+        (cdo_vs,   orig_vs   if has_orig else None, 'Vertical speed [ft/min]'),
+        (cdo_ff,   orig_ff   if has_orig else None, 'Fuel flow [kg/h]'),
     ]
 
-    for row_i, (data, ylabel) in enumerate(_pairs):
-        ax_l = axes[row_i][0]
-        ax_r = axes[row_i][1]
-
-        ax_l.plot(ttg, data, linewidth=1.3, color='#1f77b4')
-        ax_l.set_xlabel('Time to go [min]')
-        ax_l.set_ylabel(ylabel)
-        ax_l.invert_xaxis()
-        ax_l.grid(True, alpha=0.4)
-
-        ax_r.plot(dtg, data, linewidth=1.3, color='#1f77b4')
-        ax_r.set_xlabel('Distance to go [NM]')
-        ax_r.set_ylabel(ylabel)
-        ax_r.invert_xaxis()
-        ax_r.grid(True, alpha=0.4)
+    for row_i, (cdo_d, orig_d, ylabel) in enumerate(_perf):
+        for col_i, (xdata_cdo, xdata_orig, xlabel) in enumerate([
+            (cdo_ttg,  orig_ttg,  'Time to go [min]'),
+            (cdo_dtg,  orig_dtg,  'Distance to go [NM]'),
+        ]):
+            ax = axes[row_i][col_i]
+            if has_orig and orig_d and xdata_orig:
+                ax.plot(xdata_orig, orig_d, linewidth=1.2, color='#1f77b4', label='Original')
+            ax.plot(xdata_cdo, cdo_d, linewidth=1.2, color='#ff7f0e', label='CDO')
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.invert_xaxis()
+            ax.grid(True, alpha=0.4)
+            if row_i == 0 and col_i == 0 and has_orig:
+                ax.legend(fontsize=7)
 
     fig1.tight_layout(rect=[0, 0, 1, 0.97])
     fig1.savefig(fig_dir / f'{stem}_{callsign}_{actype}_fig1.png', dpi=150)
     plt.close(fig1)
 
-    # ── Figure 2: wind & track profiles ────────────────────────────────────
+    # ── Figure 2: wind & track ─────────────────────────────────────────────
     fig2, axes2 = plt.subplots(4, 2, figsize=(12, 14))
     fig2.suptitle(title, fontsize=13, fontweight='bold')
 
-    if weather_rows and len(weather_rows) == len(rows):
-        wind_comp = [r.get('wind_comp', 0) for r in weather_rows]
-        wind_spd  = [r.get('wind_speed_ms', 0) * _MS_TO_KT for r in weather_rows]
-        wind_dir  = [r.get('wind_dir_deg', 0) for r in weather_rows]
-    else:
-        wind_comp = [0.0] * len(rows)
-        wind_spd  = [0.0] * len(rows)
-        wind_dir  = [0.0] * len(rows)
-
-    _wind_pairs = [
-        (wind_comp, 'Wind comp [-]'),
-        (wind_spd,  'Wind speed [kt]'),
-        (wind_dir,  'Wind dir [deg]'),
-        (tracks,    'Flight track [deg]'),
+    _wind = [
+        (cdo_trk,  orig_trk  if has_orig else None, 'Flight track [deg]'),
+        ([0.0]*len(rows), None, 'Wind comp [-]'),
+        ([0.0]*len(rows), None, 'Wind speed [kt]'),
+        ([0.0]*len(rows), None, 'Wind dir [deg]'),
     ]
 
-    for row_i, (data, ylabel) in enumerate(_wind_pairs):
-        ax_l = axes2[row_i][0]
-        ax_r = axes2[row_i][1]
-
-        ax_l.plot(ttg, data, linewidth=1.3, color='#2ca02c')
-        ax_l.set_xlabel('Time to go [min]')
-        ax_l.set_ylabel(ylabel)
-        ax_l.invert_xaxis()
-        ax_l.grid(True, alpha=0.4)
-
-        ax_r.plot(dtg, data, linewidth=1.3, color='#2ca02c')
-        ax_r.set_xlabel('Distance to go [NM]')
-        ax_r.set_ylabel(ylabel)
-        ax_r.invert_xaxis()
-        ax_r.grid(True, alpha=0.4)
+    for row_i, (cdo_d, orig_d, ylabel) in enumerate(_wind):
+        for col_i, (xdata_cdo, xdata_orig, xlabel) in enumerate([
+            (cdo_ttg, orig_ttg,  'Time to go [min]'),
+            (cdo_dtg, orig_dtg,  'Distance to go [NM]'),
+        ]):
+            ax = axes2[row_i][col_i]
+            if has_orig and orig_d and xdata_orig:
+                ax.plot(xdata_orig, orig_d, linewidth=1.2, color='#1f77b4', label='Original')
+            ax.plot(xdata_cdo, cdo_d, linewidth=1.2, color='#ff7f0e', label='CDO')
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.invert_xaxis()
+            ax.grid(True, alpha=0.4)
 
     fig2.tight_layout(rect=[0, 0, 1, 0.97])
     fig2.savefig(fig_dir / f'{stem}_{callsign}_{actype}_fig2.png', dpi=150)
     plt.close(fig2)
 
     # ── Figure 3: geographic map ────────────────────────────────────────────
-    fig3, ax3 = plt.subplots(figsize=(9, 9))
+    fig3, ax3 = plt.subplots(figsize=(10, 10))
     fig3.suptitle(title, fontsize=13, fontweight='bold')
 
-    ax3.plot(_TMA_LON, _TMA_LAT, color='#1870A2', linewidth=1.2, label='TMA boundary')
+    basemap_ok = False
+    try:
+        import contextily as ctx
+        import pyproj
+        from matplotlib.patches import Patch
+        basemap_ok = True
+    except ImportError:
+        pass
 
-    for (lat1, lon1), (lat2, lon2) in _ESSA_RWY:
-        ax3.plot([lon1, lon2], [lat1, lat2], 'k-', linewidth=2)
+    if basemap_ok:
+        try:
+            import numpy as np
+            transformer = pyproj.Transformer.from_crs('EPSG:4326', 'EPSG:3857', always_xy=True)
 
-    for name, (lat, lon) in _ENTRY_POINTS.items():
-        ax3.plot(lon, lat, 'k^', markersize=8, linewidth=2)
-        ax3.text(lon + 0.03, lat, name, fontsize=8)
+            def _to_web(lons, lats):
+                xs, ys = transformer.transform(lons, lats)
+                return list(xs), list(ys)
 
-    for name, (lat, lon) in _FAP_POINTS.items():
-        ax3.plot(lon, lat, 'k*', markersize=6)
+            tma_xs, tma_ys = _to_web(_TMA_LON, _TMA_LAT)
+            ax3.plot(tma_xs, tma_ys, color='#1870A2', linewidth=1.5, label='TMA boundary')
 
-    for name, pts in _STAR_ROUTES.items():
-        slat = [p[0] for p in pts]
-        slon = [p[1] for p in pts]
-        ax3.plot(slon, slat, '--o', color='#797979', markersize=4, linewidth=1)
+            for (lat1, lon1), (lat2, lon2) in _ESSA_RWY:
+                xs, ys = _to_web([lon1, lon2], [lat1, lat2])
+                ax3.plot(xs, ys, 'k-', linewidth=2.5)
 
-    ax3.plot(lons, lats, 'k-', linewidth=1.8, label='CDO track')
-    ax3.plot(lons[0], lats[0], 'ro', markersize=7, label='TMA entry')
-    ax3.plot(lons[-1], lats[-1], 'rs', markersize=7, label='FAP')
+            for name, (lat, lon) in _ENTRY_POINTS.items():
+                xs, ys = _to_web([lon], [lat])
+                ax3.plot(xs[0], ys[0], 'k^', markersize=9)
+                ax3.annotate(name, (xs[0], ys[0]), xytext=(8, 4), textcoords='offset points', fontsize=8)
 
-    ax3.set_xlabel('Longitude')
-    ax3.set_ylabel('Latitude')
+            for name, (lat, lon) in _FAP_POINTS.items():
+                xs, ys = _to_web([lon], [lat])
+                ax3.plot(xs[0], ys[0], 'k*', markersize=8)
+
+            for name, pts in _STAR_ROUTES.items():
+                slons = [p[1] for p in pts]
+                slats = [p[0] for p in pts]
+                xs, ys = _to_web(slons, slats)
+                ax3.plot(xs, ys, '--o', color='#797979', markersize=4, linewidth=1)
+
+            if has_orig:
+                xs, ys = _to_web(orig_lons, orig_lats)
+                ax3.plot(xs, ys, '-', color='#1f77b4', linewidth=1.5, label='Original track')
+
+            cdo_xs, cdo_ys = _to_web(cdo_lons, cdo_lats)
+            ax3.plot(cdo_xs, cdo_ys, 'k-', linewidth=2.0, label='CDO track')
+            ax3.plot(cdo_xs[0], cdo_ys[0], 'ro', markersize=8, label='TMA entry')
+            ax3.plot(cdo_xs[-1], cdo_ys[-1], 'rs', markersize=8, label='FAP/threshold')
+
+            margin = 50000
+            all_xs = tma_xs + cdo_xs + (list(_to_web(orig_lons, orig_lats)[0]) if has_orig else [])
+            all_ys = tma_ys + cdo_ys + (list(_to_web(orig_lons, orig_lats)[1]) if has_orig else [])
+            ax3.set_xlim(min(all_xs) - margin, max(all_xs) + margin)
+            ax3.set_ylim(min(all_ys) - margin, max(all_ys) + margin)
+
+            ctx.add_basemap(ax3, crs='EPSG:3857', source=ctx.providers.OpenStreetMap.Mapnik, zoom='auto')
+
+            ax3.set_xlabel('Longitude')
+            ax3.set_ylabel('Latitude')
+
+            import matplotlib.ticker as mticker
+            _inv = pyproj.Transformer.from_crs('EPSG:3857', 'EPSG:4326', always_xy=True)
+            ax3.xaxis.set_major_formatter(mticker.FuncFormatter(
+                lambda x, _: f'{_inv.transform(x, 0)[0]:.1f}°E'))
+            ax3.yaxis.set_major_formatter(mticker.FuncFormatter(
+                lambda y, _: f'{_inv.transform(0, y)[1]:.1f}°N'))
+
+        except Exception as _e:
+            basemap_ok = False
+            import traceback as _tb; _tb.print_exc()
+
+    if not basemap_ok:
+        ax3.plot(_TMA_LON, _TMA_LAT, color='#1870A2', linewidth=1.5, label='TMA boundary')
+        for (lat1, lon1), (lat2, lon2) in _ESSA_RWY:
+            ax3.plot([lon1, lon2], [lat1, lat2], 'k-', linewidth=2.5)
+        for name, (lat, lon) in _ENTRY_POINTS.items():
+            ax3.plot(lon, lat, 'k^', markersize=9)
+            ax3.annotate(name, (lon, lat), xytext=(3, 3), textcoords='offset points', fontsize=8)
+        for name, (lat, lon) in _FAP_POINTS.items():
+            ax3.plot(lon, lat, 'k*', markersize=8)
+        for name, pts in _STAR_ROUTES.items():
+            ax3.plot([p[1] for p in pts], [p[0] for p in pts], '--o', color='#797979', markersize=4, linewidth=1)
+        if has_orig:
+            ax3.plot(orig_lons, orig_lats, '-', color='#1f77b4', linewidth=1.5, label='Original track')
+        ax3.plot(cdo_lons, cdo_lats, 'k-', linewidth=2.0, label='CDO track')
+        ax3.plot(cdo_lons[0], cdo_lats[0], 'ro', markersize=8, label='TMA entry')
+        ax3.plot(cdo_lons[-1], cdo_lats[-1], 'rs', markersize=8, label='FAP/threshold')
+        ax3.set_xlabel('Longitude')
+        ax3.set_ylabel('Latitude')
+        ax3.set_aspect('equal', adjustable='datalim')
+        ax3.grid(True, alpha=0.3)
+
     ax3.legend(fontsize=8, loc='lower right')
-    ax3.grid(True, alpha=0.3)
-    ax3.set_aspect('equal', adjustable='datalim')
-
     fig3.tight_layout(rect=[0, 0, 1, 0.97])
     fig3.savefig(fig_dir / f'{stem}_{callsign}_{actype}_fig3.png', dpi=150)
     plt.close(fig3)
-
-
-def generate_all_cdo_figures(
-    all_cdo_data: Dict[str, Dict],
-    out_dir: Path,
-    stem: str,
-):
-    """Generate figures for all aircraft in a TMAOpt run.
-
-    Parameters
-    ----------
-    all_cdo_data : {callsign: {'rows': [...], 'actype': '...'}}
-    out_dir      : TMAOpt output directory
-    stem         : filename stem
-    """
-    for cs, data in all_cdo_data.items():
-        rows   = data.get('rows', [])
-        actype = data.get('actype', 'UNKN')
-        try:
-            generate_cdo_figures(rows, cs, actype, out_dir, stem)
-        except Exception as exc:
-            pass

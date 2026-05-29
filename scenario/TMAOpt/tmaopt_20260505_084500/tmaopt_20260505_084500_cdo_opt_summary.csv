@@ -1,0 +1,5 @@
+callsign,actype,bada_model,cdo_fuel_kg,orig_fuel_kg,fuel_saving_kg,fuel_saving_pct,duration_s,distance_nm
+NSZ8GH,B738,B738W26,123.81,555.31,431.5,77.7,877,77.2
+SAS864,A20N,A320-271N,68.89,352.04,283.15,80.4,622,58.9
+NSZ8KC,B738,B738W26,90.41,431.21,340.8,79.0,615,59.0
+KLM59U,B737,B737W24,80.49,396.8,316.31,79.7,628,58.8

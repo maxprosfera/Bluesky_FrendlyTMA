@@ -1,0 +1,4 @@
+callsign,actype,bada_model,cdo_fuel_kg,orig_fuel_kg,fuel_saving_kg,fuel_saving_pct,duration_s,distance_nm
+BCS9CG,A306,A300B4-622,171.43,470.55,299.12,63.6,666,68.9
+FPO7RB,B738,B738W26,112.35,339.37,227.02,66.9,901,94.8
+UPS282,B752,B752WRR40,95.83,358.27,262.44,73.3,690,72.7

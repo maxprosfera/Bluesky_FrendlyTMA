@@ -1,0 +1,5 @@
+callsign,actype,bada_model,cdo_fuel_kg,orig_fuel_kg,fuel_saving_kg,fuel_saving_pct,duration_s,distance_nm
+SAS2023,A20N,A320-271N,92.36,318.66,226.3,71.0,867,77.1
+NSZ8GH,B38M,B738W26,123.15,438.76,315.61,71.9,882,77.1
+SAS51N,A20N,A320-271N,72.74,288.52,215.78,74.8,661,58.8
+FIN3EJ,A321,A321-131,99.66,293.59,193.93,66.1,651,56.5
