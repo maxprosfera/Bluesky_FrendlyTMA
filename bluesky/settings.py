@@ -9,9 +9,9 @@ _cfgfile = 'settings.cfg'
 
 
 def __getattr__(name):
-    raise AttributeError(f'Variable \'{name}\' not found in settings. '
+    raise AttributeError(f"Variable '{name}' not found in settings. "
                          'You should specify a default value with '
-                         'bluesky.settings.set_variable_defaults()'
+                         'bluesky.settings.set_variable_defaults() '
                          'to avoid this error.')
 
 

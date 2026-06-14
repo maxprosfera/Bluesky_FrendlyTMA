@@ -1,0 +1,5 @@
+callsign,icao24,actype,bada_model,fuel_kg,duration_s,distance_nm,mean_fl,n_segments
+SAS51N,4cae8e,A20N,A320-271N,110.51,660.0,58.8,133.0,660
+FIN3EJ,461fa8,A321,A321-131,126.45,650.0,56.4,123.0,650
+NSZ8GH,4aca83,B38M,B738W26,163.63,881.0,77.0,159.0,881
+SAS2023,4a91fa,A20N,A320-271N,129.38,866.0,77.1,168.0,866

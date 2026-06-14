@@ -185,6 +185,7 @@ def cdogenopt(result_pkl: 'txt' = ''):
 # ---------------------------------------------------------------------------
 
 def _run_cdo(csv_path: str):
+    from datetime import datetime as _dt
     csv_path = Path(csv_path)
     stem     = csv_path.stem
     for suffix in ('_historical', '_tracks'):
@@ -192,12 +193,17 @@ def _run_cdo(csv_path: str):
             stem = stem[:-len(suffix)]
             break
 
-    # Determine output directory: TMAOpt subdir or OpenSky
+    # Determine base output directory: TMAOpt subdir or OpenSky
     tmaopt_subdir = _TMAOPT_DIR / stem
     if tmaopt_subdir.is_dir():
-        out_dir = tmaopt_subdir
+        base_dir = tmaopt_subdir
     else:
-        out_dir = _SCENARIO_DIR
+        base_dir = _SCENARIO_DIR
+
+    # Save CDOGEN results into a timestamped subfolder
+    ts      = _dt.now().strftime('%Y%m%d_%H%M%S')
+    out_dir = base_dir / f'CDO_{ts}'
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         rows = _read_tracks_csv(csv_path)
@@ -275,6 +281,18 @@ def _run_cdo(csv_path: str):
             pt['actype']     = actype
             pt['bada_model'] = bada_name
         cdo_rows_all.extend(cdo_pts)
+
+        # Per-aircraft CSV
+        ac_csv = out_dir / f'{stem}_cdo_{cs}.csv'
+        _save_cdo_csv(ac_csv, cdo_pts)
+
+        # Figures
+        try:
+            from bluesky.plugins.cdo_plots import generate_cdo_figures
+            generate_cdo_figures(cdo_pts, cs, actype, out_dir, stem,
+                                 orig_rows=ac_rows)
+        except Exception:
+            pass
 
         summary.append({
             'callsign':       cs,
@@ -1746,8 +1764,9 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
     if TMA_dist_nm < 0.1:
         return []
 
-    r0      = rows[0]
-    fap_alt = _CDO_FAP_ALT_M
+    r0         = rows[0]
+    fap_alt    = _CDO_FAP_ALT_M
+    entry_alt  = float(r0['baro_alt_m'])   # actual observed entry altitude — hard cap for backward integration
 
     # -----------------------------------------------------------------------
     # Build speed schedule anchored at FAP (paper: speed schedule fixed,
@@ -1798,7 +1817,7 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
     backward = []   # list of (alt, CAS_ms, M, TAS, GS, FF, rocd) per backward step
     MAX_ITER = 7200
 
-    _ALT_CAP_M = 15000.0   # hard cap — above this BADA idle coefficients are unreliable
+    _ALT_CAP_M = min(15000.0, entry_alt)   # cap at observed entry altitude
 
     for _ in range(MAX_ITER):
         alt = min(alt, _ALT_CAP_M)
@@ -1866,6 +1885,8 @@ def _cdo_for_aircraft(rows: list, bada: dict, weather) -> list:
         cum_dist += GS * _M_TO_NM
 
         if cum_dist >= TMA_dist_nm:
+            break
+        if alt >= entry_alt:
             break
 
     if not backward:
