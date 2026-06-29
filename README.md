@@ -205,15 +205,19 @@ Bluesky_FrendlyTMA/
 │   │   └── BADA_3.16/          # BADA 3.16 aircraft list CSVs (metadata only)
 │   └── Weather/                # ECMWF/GFS wind data
 └── scenario/
-    ├── OpenSky/                # Historical OpenSky track scenarios
+    ├── OpenSky/                # Historical OpenSky track scenarios (.scn)
     └── TMAOpt/                 # TMAOpt results, CDO profiles, figures
         └── tmaopt_YYYYMMDD_HHMMSS/
-            ├── aircraft.csv
-            ├── *_historical.csv
-            ├── *_cdo_opt.csv
-            ├── *_cdo_opt.scn
-            ├── *_cdo_opt_summary.csv
-            └── CDO_YYYYMMDD_HHMMSS/
+            ├── aircraft.csv                   # Entry snapshot per aircraft
+            ├── *_historical.csv               # Raw OpenSky track data
+            ├── *_cdo_opt.csv                  # CDO profile points (all aircraft)
+            ├── *_cdo_opt_summary.csv          # Per-aircraft fuel savings summary
+            ├── tmaopt_YYYYMMDD_HHMMSS.scn     # Gurobi-optimal routes (grid view)
+            ├── *_cdo.scn                      # CDO replay on historical tracks
+            ├── *_cdo_opt.scn                  # CDO replay on optimal routes
+            └── CDO_YYYYMMDD_HHMMSS/           # CDOGEN button output (timestamped)
+                ├── *_cdo_<callsign>.csv
+                ├── *_cdo_summary.csv
                 └── Figures/
 ```
 
@@ -226,6 +230,58 @@ Bluesky_FrendlyTMA/
 | **TMAOpt** | `tma_opt.py` | Fetches arriving traffic via OpenSky Trino, runs Gurobi route optimisation, generates CDO profiles on optimal routes, saves scenario + figures |
 | **OSHist** | `opensky_replay.py` | Loads a historical OpenSky scenario from disk or fetches from the API |
 | **CDOGEN** | `cdo_gen.py` | Computes CDO profile from an existing `_historical.csv` track; saves results into a timestamped `CDO_YYYYMMDD_HHMMSS/` subfolder with figures |
+
+---
+
+## Running scenario (.scn) files
+
+Each TMAOpt run produces three scenario files that can be loaded directly into BlueSky.
+
+### Scenario types
+
+| File | Purpose |
+|---|---|
+| `tmaopt_YYYYMMDD_HHMMSS.scn` | Gurobi-optimal routes drawn as a coloured grid — shows the optimisation tree and each aircraft's assigned path |
+| `*_cdo.scn` | CDO replay on the **historical** (actual observed) tracks — aircraft fly their real GPS path but with continuous descent speed profile |
+| `*_cdo_opt.scn` | CDO replay on the **optimal** routes — aircraft fly the Gurobi-assigned grid paths with continuous descent speed profile |
+
+### How to load a scenario
+
+**Via the BlueSky console** (type in the command bar at the bottom of the screen):
+
+```
+IC scenario/TMAOpt/tmaopt_20260512_083800/tmaopt_20260512_083800_cdo_opt.scn
+```
+
+**Via the File menu:** `File → Open scenario` — navigate to `scenario/TMAOpt/<stem>/` and select the `.scn` file.
+
+**Auto-load after TMAOpt run:** the `*_cdo_opt.scn` is loaded automatically after the pipeline completes.
+
+### Controlling the simulation
+
+Once a scenario is loaded, use these console commands:
+
+| Command | Description |
+|---|---|
+| `OP` | Start / resume simulation |
+| `HOLD` | Pause simulation |
+| `FF` | Fast-forward (no real-time limit) |
+| `DT 1` | Set simulation time step to 1 second (normal replay speed) |
+| `DT 5` | Set time step to 5 seconds (faster replay) |
+| `RESET` | Reset and unload the current scenario |
+| `ZOOM 2` | Zoom level (higher = more zoomed in) |
+| `PAN 59.65 17.92` | Pan map to lat/lon (ESSA area) |
+
+### Typical workflow for reviewing a saved run
+
+1. Start BlueSky: `python3 BlueSky.py`
+2. Load the optimal CDO scenario in the console:
+   ```
+   IC scenario/TMAOpt/tmaopt_20260512_083800/tmaopt_20260512_083800_cdo_opt.scn
+   ```
+3. Press `OP` to start the replay.
+4. Use `FF` to skip ahead, `HOLD` to pause and inspect aircraft states.
+5. To compare with the historical tracks, load the `_cdo.scn` file after `RESET`.
 
 ---
 
