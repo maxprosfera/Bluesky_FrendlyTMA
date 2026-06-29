@@ -150,7 +150,7 @@ def make_figure(stem, out_dir):
         la2, lo2 = _GRID_COORDS[n2]
         xs = [_to_web(la1, lo1)[0], _to_web(la2, lo2)[0]]
         ys = [_to_web(la1, lo1)[1], _to_web(la2, lo2)[1]]
-        ax.plot(xs, ys, color='#aaaaaa', lw=0.5, zorder=4, alpha=0.6)
+        ax.plot(xs, ys, color='#777777', lw=0.5, zorder=4, alpha=0.6)
 
     # ── tree links (coloured per entry subtree) ────────────────────────────────
     # Build node→entry mapping by traversing tree from each entry node
@@ -176,8 +176,7 @@ def make_figure(stem, out_dir):
         la2, lo2 = _GRID_COORDS[n2]
         xs = [_to_web(la1, lo1)[0], _to_web(la2, lo2)[0]]
         ys = [_to_web(la1, lo1)[1], _to_web(la2, lo2)[1]]
-        col = _entry_colour(node_entry.get(n1, B[0] if B else 9))
-        ax.plot(xs, ys, color=col, lw=2.8, zorder=6, solid_capstyle='round')
+        ax.plot(xs, ys, color='black', lw=2.8, zorder=6, solid_capstyle='round')
         ax.plot(xs, ys, color='white', lw=1.0, zorder=5,
                 solid_capstyle='round', alpha=0.5)
 
@@ -204,14 +203,13 @@ def make_figure(stem, out_dir):
     for b_node in B:
         lat, lon = _GRID_COORDS[b_node]
         x, y = _to_web(lat, lon)
-        col = _entry_colour(b_node)
-        ax.plot(x, y, '^', color=col, ms=12, zorder=11, mew=1.2,
+        ax.plot(x, y, '^', color='black', ms=12, zorder=11, mew=1.2,
                 mec='white')
         dlat, dlon = dir_offset.get(b_node, (0, 0.04))
         tx, ty = _to_web(lat + dlat, lon + dlon)
         direction = dir_label.get(b_node, '?')
         ax.text(tx, ty, direction, ha='center', va='center', fontsize=8,
-                fontweight='bold', color=col,
+                fontweight='bold', color='black',
                 bbox=dict(fc='white', ec='none', alpha=0.7, pad=1),
                 zorder=12)
 
@@ -225,11 +223,13 @@ def make_figure(stem, out_dir):
 
     # ── legend ────────────────────────────────────────────────────────────────
     legend_handles = []
+    legend_handles.append(
+        mlines.Line2D([], [], color='black', lw=2.5, label='Optimal tree'))
     for b_node in B:
         direction = dir_label.get(b_node, '?')
-        col = _entry_colour(b_node)
         legend_handles.append(
-            mlines.Line2D([], [], color=col, lw=2.5, label=f'Entry {direction}'))
+            mlines.Line2D([], [], marker='^', color='black', ms=8, lw=0,
+                          mec='white', mew=1.2, label=f'Entry {direction}'))
     legend_handles.append(
         mlines.Line2D([], [], marker='s', color='black', ms=7, lw=0,
                       mfc='white', mew=1.5, label='Merge point'))
@@ -237,7 +237,7 @@ def make_figure(stem, out_dir):
         mlines.Line2D([], [], marker='*', color='black', ms=10, lw=0,
                       label='Airport (ESSA)'))
     legend_handles.append(
-        mlines.Line2D([], [], color='#aaaaaa', lw=1.0, alpha=0.8,
+        mlines.Line2D([], [], color='#777777', lw=1.0, alpha=0.8,
                       label='Full grid'))
     ax.legend(handles=legend_handles, loc='lower left', fontsize=7.5,
               framealpha=0.9, edgecolor='#cccccc')
