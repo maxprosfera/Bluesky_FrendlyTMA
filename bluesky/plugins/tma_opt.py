@@ -30,6 +30,17 @@ _MAX_AC_PER_ENTRY  = 5         # cap per entry node to keep model tractable
 _EARTH_R_M       = 6_371_000.0
 _NM_M            = 1_852.0
 
+
+class _WP:
+    """Track waypoint — module-level so pickle can serialize it."""
+    __slots__ = ('time', 'lat', 'lon', 'baro_alt_m', 'true_track',
+                 'on_ground', 'velocity_ms', 'vertical_rate_ms')
+
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
 _ACTYPE_CACHE_PATH = _REPO_ROOT / 'cache' / 'opensky' / 'actype_cache.json'
 _actype_cache_tma: dict = {}
 _actype_cache_tma_loaded: bool = False
@@ -1199,13 +1210,6 @@ def _load_tracks_from_csv(csv_path):
         lat, lon, baro_alt_m, true_track, on_ground, velocity_ms, vertical_rate_ms
     """
     from collections import defaultdict
-
-    class _WP:
-        __slots__ = ('time','lat','lon','baro_alt_m','true_track',
-                     'on_ground','velocity_ms','vertical_rate_ms')
-        def __init__(self, **kw):
-            for k, v in kw.items():
-                setattr(self, k, v)
 
     # Group rows by (icao24, callsign)
     groups = defaultdict(list)
