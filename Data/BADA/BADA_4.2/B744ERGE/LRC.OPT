@@ -1,0 +1,36 @@
+BADA LONG RANGE CRUISE FILE                                      Mar 17 2016
+
+Type: JET
+AC: B744ERGE
+Engine rating: 
+Number of tables: 1
+
+Table name: LRC
+Table type: 1D
+Table variables: CW
+Table dimension: 21x1
+Table results: Mlrc [-]
+
+        CW|      Mlrc
+=====================
+  1.083923|  0.592763
+  1.374911|  0.651103
+  1.665899|  0.700362
+  1.956887|  0.745631
+  2.247875|  0.790830
+  2.538863|  0.829506
+  2.829851|  0.846587
+  3.120839|  0.852785
+  3.411827|  0.854730
+  3.702815|  0.854273
+  3.993803|  0.852054
+  4.284791|  0.848360
+  4.575779|       NaN
+  4.866767|       NaN
+  5.157755|       NaN
+  5.448742|       NaN
+  5.739730|       NaN
+  6.030718|       NaN
+  6.321706|       NaN
+  6.612694|       NaN
+  6.903682|       NaN
