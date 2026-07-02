@@ -13,7 +13,7 @@ Targets ESSA Stockholm Arlanda. Requires a Gurobi licence and BADA 4.2 data.
 | Python | 3.10 – 3.14 | 3.14 recommended |
 | Gurobi | 11+ | Academic licence available free at gurobi.com |
 | BADA 4.2 | — | Licence required from EUROCONTROL; XML files go in `Data/BADA/BADA_4.2/` |
-| FrendlyTMA code | — | Sibling repo at `../FrendlyTMA/Code` |
+| FrendlyTMA grid data | — | Bundled in `Data/FrendlyTMA/` — no separate install needed |
 | OpenSky credentials | — | OAuth2 client id + secret from opensky-network.org |
 
 ---
@@ -27,15 +27,9 @@ git clone https://github.com/your-org/Bluesky_FrendlyTMA.git
 cd Bluesky_FrendlyTMA
 ```
 
-### 2. Clone the FrendlyTMA optimisation code (sibling directory)
+### 2. Clone the repository
 
-The plugin expects this at `../FrendlyTMA/Code` relative to the repo root.
-
-```bash
-cd ..
-git clone https://github.com/your-org/FrendlyTMA.git
-cd Bluesky_FrendlyTMA
-```
+No additional sibling repos are required. The FrendlyTMA grid files (routing graph, node coordinates, path list) are bundled in `Data/FrendlyTMA/` inside this repo.
 
 ### 3. Create and activate a virtual environment
 
@@ -111,17 +105,9 @@ python3 BlueSky.py
 
 Download from [python.org](https://www.python.org/downloads/windows/). During installation, check **"Add Python to PATH"**.
 
-### 2. Clone repositories
+### 2. Clone the repository
 
-Open **PowerShell** or **Git Bash**:
-
-```powershell
-git clone https://github.com/your-org/Bluesky_FrendlyTMA.git
-cd Bluesky_FrendlyTMA
-cd ..
-git clone https://github.com/your-org/FrendlyTMA.git
-cd Bluesky_FrendlyTMA
-```
+No additional sibling repos are required. The FrendlyTMA grid files are bundled in `Data/FrendlyTMA/` inside this repo.
 
 ### 3. Create and activate a virtual environment
 
@@ -402,15 +388,9 @@ If you run both the source install and a pip-installed BlueSky on the same machi
 
 ---
 
-## FrendlyTMA code path
+## FrendlyTMA grid data path
 
-`tma_opt.py` expects the FrendlyTMA optimisation code at the **hardcoded path**:
-
-```
-/Users/maximmoroz/liuprojects/FrendlyTMA/Code
-```
-
-On a new machine, update the `_FRENDLY_CODE` constant at the top of `bluesky/plugins/tma_opt.py`:
+`tma_opt.py` looks for the routing graph files in `Data/FrendlyTMA/` inside the repo (bundled). If that folder is missing on a new machine, update `_FRENDLY_CODE` at the top of `bluesky/plugins/tma_opt.py`:
 
 ```python
 _FRENDLY_CODE = Path('/your/path/to/FrendlyTMA/Code')
