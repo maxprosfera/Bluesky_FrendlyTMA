@@ -184,6 +184,71 @@ def tmaopt(dtstr: str = '', duration: int = 60, entries: str = 'NESW',
     t.start()
 
 
+@stack.command
+def tmaoptfile(filename: 'string', entries: str = 'NESW',
+               max_ac: int = 15, max_ac_per_entry: int = 5,
+               max_eps: int = 3, time_limit_per_eps: int = 300,
+               s1: int = 2, s2: int = 3,
+               cdo_args: 'string' = ''):
+    """<filename> [entries] [max_ac] [max_ac_per_entry] [max_eps]
+    [time_limit_s] [s1] [s2] [cdo_args]
+    Optimise TMA entry using a local historical tracks CSV (OSHist or TMAOpt _historical.csv).
+    filename can be an absolute path or relative to scenario/OpenSky/ or scenario/TMAOpt/."""
+    stack.stack('ECHO TMAOPT: Starting (file mode) ...')
+
+    # Resolve filename to an absolute path
+    p = Path(filename)
+    if not p.is_absolute():
+        # Try scenario/OpenSky/ first, then TMAOpt tree
+        for candidate in [
+            _REPO_ROOT / 'scenario' / 'OpenSky' / filename,
+            _REPO_ROOT / 'scenario' / 'TMAOpt'  / filename,
+        ]:
+            if candidate.is_file():
+                p = candidate
+                break
+        if not p.is_file():
+            # Try TMAOpt subdirs (e.g. just the stem)
+            stem = Path(filename).stem
+            for d in (_REPO_ROOT / 'scenario' / 'TMAOpt').iterdir():
+                if d.is_dir():
+                    for ext in ('_historical.csv', '_tracks.csv', '.csv'):
+                        c = d / (stem + ext)
+                        if c.is_file():
+                            p = c; break
+                if p.is_file():
+                    break
+
+    if not p.is_file():
+        stack.stack(f'ECHO TMAOPT: File not found: {filename}')
+        return
+
+    _CDO_DEFAULTS = [2000, 200, 220, 0.84, 0.9, 1.0, 1, 1.23]
+    _CDO_KEYS     = ['fap_alt_ft', 'ias_start_kt', 'ias_restrict_kt',
+                     'mach', 'mlw_factor', 'kt_per_sec', 'wind_temp', 'c_v_min']
+    parts = cdo_args.strip().split() if cdo_args.strip() else []
+    vals  = []
+    for i, default in enumerate(_CDO_DEFAULTS):
+        try:
+            vals.append(type(default)(parts[i]))
+        except (IndexError, ValueError):
+            vals.append(default)
+    cdo_params = dict(zip(_CDO_KEYS, vals))
+    cdo_params['wind_temp'] = bool(int(cdo_params['wind_temp']))
+
+    t = threading.Thread(
+        target=_run_tmaopt,
+        kwargs=dict(
+            entries=entries.upper(), max_ac=max_ac,
+            max_ac_per_entry=max_ac_per_entry, max_eps=max_eps,
+            time_limit_per_eps=time_limit_per_eps, s1=s1, s2=s2,
+            cdo_params=cdo_params, csv_path=str(p),
+        ),
+        daemon=True,
+    )
+    t.start()
+
+
 # ── Geo helpers ──────────────────────────────────────────────────────────────
 def _haversine_nm(p1, p2):
     la1, lo1 = math.radians(p1[0]), math.radians(p1[1])
@@ -1125,13 +1190,108 @@ def _save_historical_csv(out_dir, tracks, timestamp_str):
 
 
 # ── Main thread ───────────────────────────────────────────────────────────────
+def _load_tracks_from_csv(csv_path):
+    """Load a historical tracks CSV (OSHist or TMAOpt _historical.csv) and
+    return (records, track_waypoints) in the same shape as _fetch_historical.
+
+    The CSV columns expected:
+        icao24, callsign, est_departure, est_arrival, time,
+        lat, lon, baro_alt_m, true_track, on_ground, velocity_ms, vertical_rate_ms
+    """
+    from collections import defaultdict
+
+    class _WP:
+        __slots__ = ('time','lat','lon','baro_alt_m','true_track',
+                     'on_ground','velocity_ms','vertical_rate_ms')
+        def __init__(self, **kw):
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    # Group rows by (icao24, callsign)
+    groups = defaultdict(list)
+    with open(csv_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            key = (row['icao24'].strip(), row['callsign'].strip())
+            groups[key].append(row)
+
+    track_waypoints = {}   # callsign.upper() -> [_WP, ...]
+    records         = []   # one snapshot dict per aircraft
+
+    for (icao24, callsign), rows in groups.items():
+        rows.sort(key=lambda r: float(r['time'] or 0))
+        wps = []
+        for r in rows:
+            try:
+                wp = _WP(
+                    time               = float(r['time']),
+                    lat                = float(r['lat']),
+                    lon                = float(r['lon']),
+                    baro_alt_m         = float(r['baro_alt_m']) if r['baro_alt_m'] else None,
+                    true_track         = float(r['true_track']) if r['true_track'] else None,
+                    on_ground          = bool(int(r['on_ground'])) if r['on_ground'] else False,
+                    velocity_ms        = float(r['velocity_ms']) if r['velocity_ms'] else None,
+                    vertical_rate_ms   = float(r['vertical_rate_ms']) if r['vertical_rate_ms'] else None,
+                )
+                wps.append(wp)
+            except (ValueError, KeyError):
+                continue
+
+        if not wps:
+            continue
+
+        cs_key = (callsign or icao24).strip().upper()
+        track_waypoints[cs_key] = [wp for wp in wps if not wp.on_ground]
+
+        # Snapshot: last airborne waypoint outside the grid, else first inside
+        airborne = [wp for wp in wps if not wp.on_ground
+                    and wp.baro_alt_m and wp.baro_alt_m > 300]
+        if not airborne:
+            continue
+        outside = [wp for wp in airborne if not _point_in_grid(wp.lat, wp.lon)]
+        wp = outside[-1] if outside else airborne[0]
+
+        crossing_ts = _grid_crossing_time(airborne)
+
+        records.append({
+            'icao24':        icao24,
+            'callsign':      callsign,
+            'lat':           wp.lat,
+            'lon':           wp.lon,
+            'baro_alt':      wp.baro_alt_m or 0.0,
+            'on_ground':     False,
+            'velocity':      wp.velocity_ms or 200.0,
+            'heading':       wp.true_track or 0.0,
+            'vertrate':      wp.vertical_rate_ms or 0.0,
+            'time':          wp.time,
+            'crossing_time': crossing_ts,
+        })
+
+    return records, track_waypoints
+
+
 def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
                 max_ac_per_entry=5, max_eps=3, time_limit_per_eps=300,
-                s1=2, s2=3, fetch_radius=50, cdo_params=None):
+                s1=2, s2=3, fetch_radius=50, cdo_params=None,
+                csv_path=None):
     now_unix = time.time()
 
     # Determine begin/end timestamps
-    if dtstr:
+    if csv_path:
+        # Derive timestamps from the CSV filename or its data range
+        p = Path(csv_path)
+        # Try to extract YYYYMMDD_HHMMSS from filename
+        import re
+        m = re.search(r'(\d{8})_(\d{6})', p.stem)
+        if m:
+            end_ts = int(datetime.strptime(
+                m.group(1) + m.group(2), '%Y%m%d%H%M%S'
+            ).replace(tzinfo=timezone.utc).timestamp())
+        else:
+            end_ts = int(now_unix)
+        begin_ts = end_ts - int(duration) * 60
+        ref_unix = (begin_ts + end_ts) // 2
+    elif dtstr:
         end_ts_parsed = _parse_dtstr(dtstr)
         if end_ts_parsed is None:
             stack.stack(f'ECHO TMAOPT: Cannot parse datetime "{dtstr}". Use YYYY-MM-DDTHH:MM.')
@@ -1144,24 +1304,32 @@ def _run_tmaopt(dtstr='', duration=60, entries='NESW', max_ac=15,
         end_ts   = int(now_unix)
         ref_unix = int(now_unix)
 
-    age_s = now_unix - begin_ts
-    _ = age_s  # always using Trino regardless of age
-
     ts      = datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime('%Y%m%d_%H%M%S')
     out_dir = _SCENARIO_DIR / f'tmaopt_{ts}'
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Fetch aircraft via Trino
+    # 1. Load aircraft — from CSV file or via Trino
     track_waypoints = {}
-    stack.stack(f'ECHO TMAOPT: Fetching {duration} min window ending at {datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M")} UTC via Trino ...')
-    stack.stack(f'ECHO TMAOPT: Params — entries={entries} max_ac={max_ac} max_ac/entry={max_ac_per_entry} max_eps={max_eps} TL={time_limit_per_eps}s s1={s1} s2={s2} radius={fetch_radius}nm')
-    raw_ac, raw_tracks = _fetch_historical(begin_ts, end_ts, fetch_radius_nm=float(fetch_radius))
-    if raw_tracks:
-        _save_historical_csv(out_dir, raw_tracks, ts)
-        for t in raw_tracks:
-            cs = t.callsign.strip().upper() or t.icao24.upper()
-            track_waypoints[cs] = [wp for wp in t.waypoints if not wp.on_ground]
-    stack.stack(f'ECHO TMAOPT: {len(raw_ac)} state vectors received.')
+    stack.stack(f'ECHO TMAOPT: Params — entries={entries} max_ac={max_ac} max_ac/entry={max_ac_per_entry} max_eps={max_eps} TL={time_limit_per_eps}s s1={s1} s2={s2}')
+
+    if csv_path:
+        stack.stack(f'ECHO TMAOPT: Loading tracks from file: {Path(csv_path).name} ...')
+        try:
+            raw_ac, track_waypoints = _load_tracks_from_csv(csv_path)
+        except Exception as exc:
+            stack.stack(f'ECHO TMAOPT: Failed to load CSV: {exc}')
+            return
+        stack.stack(f'ECHO TMAOPT: {len(raw_ac)} aircraft loaded from file.')
+    else:
+        stack.stack(f'ECHO TMAOPT: Fetching {duration} min window ending at '
+                    f'{datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M")} UTC via Trino ...')
+        raw_ac, raw_tracks = _fetch_historical(begin_ts, end_ts, fetch_radius_nm=float(fetch_radius))
+        if raw_tracks:
+            _save_historical_csv(out_dir, raw_tracks, ts)
+            for t in raw_tracks:
+                cs = t.callsign.strip().upper() or t.icao24.upper()
+                track_waypoints[cs] = [wp for wp in t.waypoints if not wp.on_ground]
+        stack.stack(f'ECHO TMAOPT: {len(raw_ac)} state vectors received.')
 
     if not raw_ac:
         stack.stack('ECHO TMAOPT: No data received — aborting.')
