@@ -94,3 +94,7 @@ ssd.obj
 *-checkpoint.py
 *-checkpoint.ipynb
 .ropeproject/config.py
+
+# Large aircraft database — download separately
+Data/Airframe/aircraftDatabase-*.csv
+

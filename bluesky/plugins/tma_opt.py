@@ -18,7 +18,10 @@ from bluesky import stack
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 _REPO_ROOT    = Path(__file__).resolve().parents[2]
-_FRENDLY_CODE = Path('/Users/maximmoroz/liuprojects/FrendlyTMA/Code')
+_FRENDLY_CODE = Path(__file__).parents[2] / 'Data' / 'FrendlyTMA'
+if not _FRENDLY_CODE.is_dir():
+    # fallback to sibling repo (legacy layout)
+    _FRENDLY_CODE = Path('/Users/maximmoroz/liuprojects/FrendlyTMA/Code')
 _SCENARIO_DIR = _REPO_ROOT / 'scenario' / 'TMAOpt'
 _SCENARIO_DIR.mkdir(parents=True, exist_ok=True)
 
