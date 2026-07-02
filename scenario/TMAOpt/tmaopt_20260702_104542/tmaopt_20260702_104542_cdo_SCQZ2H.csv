@@ -1,0 +1,2 @@
+icao24,callsign,est_departure,est_arrival,time,lat,lon,baro_alt_m,true_track,on_ground,velocity_ms,vertical_rate_ms,cas_ms,mach,fuel_flow_kg_s,cum_fuel_kg,cum_dist_nm
+478ecf,SCQZ2H,,,1782987480,59.720204,16.7003,304.8,0.0,False,32.92,-2.452,36.97,0.2,0.16991,0.17,0.018
