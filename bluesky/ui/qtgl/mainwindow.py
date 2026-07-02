@@ -270,10 +270,38 @@ class TMAOptDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle('TMA Optimization')
         self.setModal(True)
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(440)
 
         root = QVBoxLayout(self)
         root.setSpacing(8)
+
+        # ── Data source toggle ────────────────────────────────────────
+        from PyQt6.QtWidgets import QRadioButton, QButtonGroup, QLineEdit
+        src_group  = QGroupBox('Data Source')
+        src_layout = QHBoxLayout(src_group)
+        self.rb_trino = QRadioButton('OpenSky Trino')
+        self.rb_file  = QRadioButton('Local CSV file')
+        self.rb_trino.setChecked(True)
+        src_layout.addWidget(self.rb_trino)
+        src_layout.addWidget(self.rb_file)
+        root.addWidget(src_group)
+
+        # File picker row (hidden until rb_file selected)
+        self.file_widget = QWidget()
+        file_layout = QHBoxLayout(self.file_widget)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        self.file_edit = QLineEdit()
+        self.file_edit.setPlaceholderText('Path to _historical.csv or _tracks.csv …')
+        self.file_edit.setReadOnly(True)
+        file_btn = QPushButton('Browse…')
+        file_btn.clicked.connect(self._browse_csv)
+        file_layout.addWidget(self.file_edit)
+        file_layout.addWidget(file_btn)
+        root.addWidget(self.file_widget)
+        self.file_widget.setVisible(False)
+
+        self.rb_trino.toggled.connect(self._on_source_toggled)
+        self.rb_file.toggled.connect(self._on_source_toggled)
 
         # ── Time window ──────────────────────────────────────────────
         dt_group = QGroupBox('Traffic Time Window (UTC)')
@@ -298,6 +326,7 @@ class TMAOptDialog(QDialog):
         self.duration_spin.setSuffix(' min')
         dt_form.addRow('Duration:', self.duration_spin)
 
+        self.dt_group = dt_group
         root.addWidget(dt_group)
 
         # ── Entry points ─────────────────────────────────────────────
@@ -361,7 +390,9 @@ class TMAOptDialog(QDialog):
         self.fetch_radius_spin.setSuffix(' nm')
         self.fetch_radius_spin.setToolTip('Radius around ESSA for Trino data fetch')
         opt_form.addRow('Fetch radius:', self.fetch_radius_spin)
+        self._fetch_radius_label = opt_form.labelForField(self.fetch_radius_spin)
 
+        self.opt_group = opt_group
         root.addWidget(opt_group)
 
         # ── CDO Parameters ────────────────────────────────────────────
@@ -436,12 +467,33 @@ class TMAOptDialog(QDialog):
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
 
+    def _on_source_toggled(self):
+        use_file = self.rb_file.isChecked()
+        self.file_widget.setVisible(use_file)
+        self.dt_group.setVisible(not use_file)
+        self.fetch_radius_spin.setVisible(not use_file)
+        if self._fetch_radius_label:
+            self._fetch_radius_label.setVisible(not use_file)
+
+    def _browse_csv(self):
+        import platform
+        from pathlib import Path
+        start = str(Path(__file__).resolve().parents[3] / 'scenario')
+        if platform.system().lower() == 'darwin':
+            response = QFileDialog.getOpenFileName(
+                self, 'Select historical CSV', start,
+                'CSV files (*.csv)')
+        else:
+            response = QFileDialog.getOpenFileName(
+                self, 'Select historical CSV', start,
+                'CSV files (*.csv)',
+                options=QFileDialog.Option.DontUseNativeDialog)
+        fname = response[0] if isinstance(response, tuple) else response
+        if fname:
+            self.file_edit.setText(fname)
+
     def _on_accept(self):
-        date_str = self.date_edit.date().toString('yyyy-MM-dd')
-        time_str = self.time_edit.time().toString('HH:mm')
-        dt_str   = f'{date_str}T{time_str}'
-        duration = self.duration_spin.value()
-        entries  = ''.join(
+        entries = ''.join(
             d for d, cb in (('N', self.cb_N), ('E', self.cb_E),
                             ('S', self.cb_S), ('W', self.cb_W)) if cb.isChecked()
         ) or 'NESW'
@@ -451,7 +503,6 @@ class TMAOptDialog(QDialog):
         time_limit       = self.time_limit_spin.value()
         s1               = self.s1_spin.value()
         s2               = self.s2_spin.value()
-        fetch_radius     = self.fetch_radius_spin.value()
         cdo_fap_alt      = self.cdo_fap_alt_spin.value()
         cdo_ias_start    = self.cdo_ias_start_spin.value()
         cdo_ias_restrict = self.cdo_ias_restrict_spin.value()
@@ -460,12 +511,29 @@ class TMAOptDialog(QDialog):
         cdo_kt_per_sec   = self.cdo_kt_per_sec_spin.value()
         cdo_wind         = int(self.cdo_wind_cb.isChecked())
         cdo_c_v_min      = self.cdo_c_v_min_spin.value()
-        stack.stack(
-            f'TMAOPT {dt_str} {duration} {entries} {max_ac} {max_ac_per_entry} '
-            f'{max_eps} {time_limit} {s1} {s2} {fetch_radius} '
-            f'{cdo_fap_alt} {cdo_ias_start} {cdo_ias_restrict} {cdo_mach} '
-            f'{cdo_mlw} {cdo_kt_per_sec} {cdo_wind} {cdo_c_v_min}'
-        )
+        cdo_args = (f'{cdo_fap_alt} {cdo_ias_start} {cdo_ias_restrict} {cdo_mach} '
+                    f'{cdo_mlw} {cdo_kt_per_sec} {cdo_wind} {cdo_c_v_min}')
+
+        if self.rb_file.isChecked():
+            fname = self.file_edit.text().strip()
+            if not fname:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, 'No file selected', 'Please select a CSV file first.')
+                return
+            stack.stack(
+                f'TMAOPTFILE {fname} {entries} {max_ac} {max_ac_per_entry} '
+                f'{max_eps} {time_limit} {s1} {s2} {cdo_args}'
+            )
+        else:
+            date_str     = self.date_edit.date().toString('yyyy-MM-dd')
+            time_str     = self.time_edit.time().toString('HH:mm')
+            dt_str       = f'{date_str}T{time_str}'
+            duration     = self.duration_spin.value()
+            fetch_radius = self.fetch_radius_spin.value()
+            stack.stack(
+                f'TMAOPT {dt_str} {duration} {entries} {max_ac} {max_ac_per_entry} '
+                f'{max_eps} {time_limit} {s1} {s2} {fetch_radius} {cdo_args}'
+            )
         self.accept()
 
 
@@ -505,6 +573,7 @@ class TMARollingDialog(QDialog):
         self.duration_spin.setToolTip('Total rolling window (minimum 120 min = 2 hours)')
         dt_form.addRow('Total Duration:', self.duration_spin)
 
+        self.dt_group = dt_group
         root.addWidget(dt_group)
 
         # ── Entry points ─────────────────────────────────────────────
