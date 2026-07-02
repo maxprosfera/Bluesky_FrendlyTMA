@@ -29,6 +29,8 @@ from bluesky import stack
 
 _REPO_ROOT    = Path(__file__).parents[2]
 _BADA_DIR     = _REPO_ROOT / 'Data' / 'BADA' / 'BADA_4.2'
+if not _BADA_DIR.is_dir():
+    _BADA_DIR = _REPO_ROOT.parent / 'Fuel_CDO_calculator' / 'Data' / 'BADA' / 'BADA_4.2'
 _WEATHER_DIR  = _REPO_ROOT / 'Data' / 'Weather'
 _ACTYPE_CACHE = _REPO_ROOT / 'cache' / 'opensky' / 'actype_cache.json'
 _SCENARIO_DIR = _REPO_ROOT / 'scenario' / 'OpenSky'
