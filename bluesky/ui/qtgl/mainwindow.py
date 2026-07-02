@@ -521,7 +521,7 @@ class TMAOptDialog(QDialog):
                 QMessageBox.warning(self, 'No file selected', 'Please select a CSV file first.')
                 return
             stack.stack(
-                f'TMAOPTFILE {fname} {entries} {max_ac} {max_ac_per_entry} '
+                f'TMAOPTFILE "{fname}" {entries} {max_ac} {max_ac_per_entry} '
                 f'{max_eps} {time_limit} {s1} {s2} {cdo_args}'
             )
         else:

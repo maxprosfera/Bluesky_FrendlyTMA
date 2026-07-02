@@ -185,7 +185,7 @@ def tmaopt(dtstr: str = '', duration: int = 60, entries: str = 'NESW',
 
 
 @stack.command
-def tmaoptfile(filename: 'string', entries: str = 'NESW',
+def tmaoptfile(filename: str, entries: str = 'NESW',
                max_ac: int = 15, max_ac_per_entry: int = 5,
                max_eps: int = 3, time_limit_per_eps: int = 300,
                s1: int = 2, s2: int = 3,
