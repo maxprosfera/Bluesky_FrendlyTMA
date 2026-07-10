@@ -98,3 +98,5 @@ ssd.obj
 # Large aircraft database — download separately
 Data/Airframe/aircraftDatabase-*.csv
 
+#BADA
+'Data/BADA/
